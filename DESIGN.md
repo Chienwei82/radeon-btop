@@ -1074,6 +1074,10 @@ Dedup test cases:
 
 ## 14. Phased implementation plan
 
+> **Delivery status is tracked in [PROGRESS.md](PROGRESS.md)**, which is updated at the end
+> of each milestone. It records what was verified against real hardware versus what is
+> still an assumption — see its Verification ledger.
+
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
 | **0. Foundations** | `pyproject.toml` (`requires-python = ">=3.14"`), `uv` lock, ruff + pytest config, package skeleton, `model/aliases.py`, `model/` dataclasses, CI matrix | `uv run pytest` runs; static tests enforce PEP 649 and no-`__future__` |
