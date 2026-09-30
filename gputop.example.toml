@@ -1,0 +1,42 @@
+# gputop configuration
+#
+# Every key is optional; the value shown is the default.  Unknown keys are reported as a
+# warning and ignored, so a file written for a newer release still works today.
+#
+# Precedence, lowest to highest:
+#   built-in defaults -> this file -> $GPUTOP_CONFIG -> ~/.config/gputop/gputop.toml
+#                       -> ~/.gputoprc -> command line flags
+
+[general]
+# Sampling interval in milliseconds.  The procfs scan is the expensive part of a sample,
+# so going much below 100 ms mostly buys duplicate work.
+interval_ms = 1000
+# Samples retained for the graphs.  At 1 s this is five minutes of history.
+history_points = 300
+
+[process]
+# Show the per-client table.
+show = true
+# Rows to display; the busiest clients are kept.
+max_rows = 20
+# Hide processes below this engine utilisation.
+min_usage_percent = 0.0
+
+[ui]
+# One of: default, dracula, gruvbox.  Also switchable at runtime with the "m" key.
+theme = "default"
+# Disable 24-bit colour and fall back to the terminal's own ANSI palette.
+no_color = false
+
+[gpu]
+# "auto", "igpu" or "dgpu".  Forcing the classification overrides the heuristics, which is
+# useful for an APU the probes misjudge.
+kind = "auto"
+
+# Marketing names for cards not in the built-in table, keyed by PCI address.  The address
+# is shown by: gputop --devices
+[gpu.names]
+# "0000:0c:00.0" = "AMD Radeon RX 7900 XTX"
+
+[diagnostics]
+dump_format = "json"
