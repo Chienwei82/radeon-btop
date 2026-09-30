@@ -1,6 +1,6 @@
 """Parser for the versioned binary ``gpu_metrics`` sysfs file.
 
-Layout, verified against a Navi 44 (``amdgpu`` 6.19.4, kernel 7.0.0-34) machine::
+Layout, verified against a live Navi 21 / RX 6800 (``amdgpu`` 6.19.4, kernel 7.0.0-34)::
 
     struct metrics_table_header {   /* offset 0, 4 bytes */
         __u16 structure_size;       /* total buffer size INCLUDING this header */
@@ -32,9 +32,12 @@ from gputop.readers.throttle import decode_throttle
 HEADER = struct.Struct("<HBB")
 HEADER_SIZE = HEADER.size
 
-#: Values written when a field is not implemented by the ASIC.  Verified on RDNA 3:
-#: 0xFFFF for temperature_hbm, 0xFFFFFFFF for the activity accumulators and
-#: 0xFFFFFFFFFFFFFFFF for firmware_timestamp.
+#: Values written when a field is not implemented by the ASIC.  Observed on the reference
+#: Navi 21: 0xFFFF for ``temperature_hbm`` (it has GDDR6, not HBM), 0xFFFFFFFF for the
+#: activity accumulators and 0xFFFFFFFFFFFFFFFF for ``firmware_timestamp``.
+#:
+#: These are sentinels, not measurements: a card with HBM would populate that field, so a
+#: missing reading must never be rendered as 65535 C or 65535 MHz.
 SENTINEL_U16 = 0xFFFF
 SENTINEL_U32 = 0xFFFFFFFF
 SENTINEL_U64 = 0xFFFFFFFFFFFFFFFF
@@ -343,7 +346,7 @@ def _temperature(value: int | None, label: str) -> Temperature | None:
 
 
 def _voltage(value: int | None, name: str) -> tuple[str, int] | None:
-    """Reject voltages outside a plausible range, e.g. an absent GFX rail."""
+    """Reject voltages outside a physically plausible rail range."""
     if value is None or not MIN_VOLTAGE_MV <= value <= MAX_VOLTAGE_MV:
         return None
     return (name, value)

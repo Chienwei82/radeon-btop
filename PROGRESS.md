@@ -25,7 +25,7 @@ device discovery, per-process accounting, sampler thread, `--dump`.
 
 **Verified**
 
-- `gpu_metrics` v1.3 decoded against a **live Navi 44** (`amdgpu` 6.19.4, kernel 7.0.0-34).
+- `gpu_metrics` v1.3 decoded against a **live Navi 21 / RX 6800** (`amdgpu` 6.19.4, kernel 7.0.0-34).
   Byte offsets and the 120-byte `structure_size` were captured from hardware and pinned as
   literal expectations, so the aligner cannot rewrite its own test.
 - Per-process accounting against live `/proc`: engine deltas, `(pdev, client-id)`
@@ -72,7 +72,7 @@ the sampler thread appended to it. Readers now receive an immutable tuple reboun
 **Verified**
 
 - 348 tests, `ruff` clean, `mypy --strict` clean.
-- Live on the Navi 44: real braille plots, per-client table, theme cycling, `--no-color`.
+- Live on the Navi 21 / RX 6800: real braille plots, per-client table, theme cycling, `--no-color`.
 - **Free-threaded (3.14t), genuinely no-GIL** (`sys._is_gil_enabled() is False`):
   - full 348-test suite passes;
   - 3.4 M concurrent `history()` reads across 4 threads while the sampler mutates it,
@@ -96,8 +96,9 @@ the sampler thread appended to it. Readers now receive an immutable tuple reboun
 
 | Property | Status | Evidence |
 |---|---|---|
-| `gpu_metrics` v1.3 layout | **Verified** | Live Navi 44; offsets pinned as literals in tests |
+| `gpu_metrics` v1.3 layout | **Verified** | Live Navi 21; offsets pinned as literals in tests |
 | `gpu_metrics` v1.0–v1.2 | **Assumed** | Reconstructed from upstream decoders; no hardware reports them |
+| Silicon attribution for a given device id | **Was wrong, now fixed** | `0x73BF` is Navi 21 (RDNA2); the table had claimed Navi 44 (RDNA3) |
 | `gpu_metrics` v2.x (APU) | **Assumed** | Reconstructed from a reference decoder. **No APU available to test against** |
 | `gpu_metrics` v3.x | **Unsupported by design** | Unknown ABIs return `None` and fall back to sysfs/hwmon |
 | `indep_throttle_status` @112 | **Inferred** | Only way to reach the declared 120-byte size; reads 0, unused |

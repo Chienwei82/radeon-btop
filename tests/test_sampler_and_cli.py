@@ -404,7 +404,7 @@ class TestCli:
 
         assert payload["count"] == 1
         assert payload["devices"][0]["bdf"] == "0000:0c:00.0"
-        assert payload["devices"][0]["name"] == "AMD Radeon Navi 44"
+        assert payload["devices"][0]["name"] == "AMD Radeon RX 6800"
 
     def test_dump_emits_json(self, drm_root: Path, proc_root: Path) -> None:
         self._drm, self._proc = drm_root, proc_root

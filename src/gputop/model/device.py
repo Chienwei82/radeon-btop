@@ -21,8 +21,12 @@ type DeviceKind = Literal["igpu", "dgpu"]
 #: render everything else as ``AMD Radeon [0x....]``.  Users can extend the mapping through
 #: the ``[gpu.names]`` table in the TOML config without touching the code.
 DEVICE_NAMES: dict[int, str] = {
-    # Verified on the reference machine used to develop gputop.
-    0x73BF: "AMD Radeon Navi 44",
+    # Confirmed with the kernel's own lspci on the reference machine:
+    #   0c:00.0 VGA: AMD/ATI Navi 21 [Radeon RX 6800/6800 XT / 6900 XT] [1002:73bf] rev c3
+    # 0x73BF is shared across that whole family, so the name names the family, not a
+    # specific SKU.  An earlier revision of this table claimed Navi 44 (RDNA3) for this
+    # id, which was simply wrong -- the id does not identify the silicon generation.
+    0x73BF: "AMD Radeon RX 6800",
     # Vega / GFX9 (consumer Vega and Frontier Edition).
     0x6860: "AMD Radeon RX Vega 64",
     0x6861: "AMD Radeon RX Vega 56",

@@ -13,7 +13,7 @@ import pytest
 
 from gputop.readers.metrics_bin import ABI_REGISTRY, HEADER, MetricsAbi
 
-#: Byte offsets verified against a real Navi 44 metric table.  Tests assert against these
+#: Byte offsets verified against a real Navi 21 metric table.  Tests assert against these
 #: literal numbers rather than re-deriving them from the registry, so a bug in the aligner
 #: cannot silently rewrite the expectation along with the code.
 V1_3_OFFSETS = {

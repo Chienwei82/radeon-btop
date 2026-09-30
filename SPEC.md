@@ -2,7 +2,7 @@
 
 **Working name:** `gputop` (package `gputop`, CLI `gputop`)
 **Status:** Draft for review — no code written yet
-**Reference hardware used for verification:** AMD Radeon Navi 44 (`0x73bf`, RDNA 3), `amdgpu` 6.19.4, kernel `7.0.0-34-generic`, Python 3.14.4
+**Reference hardware used for verification:** AMD Radeon Navi 21 / RX 6800 (`0x73bf`, RDNA2; Sapphire subsystem `148c:2407`, 16 GiB GDDR6), `amdgpu` 6.19.4, kernel `7.0.0-34-generic`, Python 3.14.4
 
 ---
 
@@ -194,14 +194,14 @@ an acceleration path, never a requirement. When absent or unparseable, the sysfs
 | `throttle_status` | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | VCN engine in fdinfo | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-**`gpu_metrics` version ↔ GPU family (verified on RDNA3 = v1.3):**
+**`gpu_metrics` version ↔ GPU family (v1.3 observed on RDNA2):**
 
 | `format_revision.content_revision` | Struct | Typical hardware |
 |------------------------------------|--------|------------------|
 | `1.0` | `gpu_metrics_v1_0` | Vega (GFX9), early Navi |
 | `1.1` | `gpu_metrics_v1_1` | Navi 10/12/14, Vega20, Renoir |
 | `1.2` | `gpu_metrics_v1_2` | adds firmware timestamp |
-| `1.3` | `gpu_metrics_v1_3` | **RDNA1–RDNA3** ← verified here |
+| `1.3` | `gpu_metrics_v1_3` | **RDNA1–RDNA3** ← observed on RDNA2 here |
 | `2.0` | `gpu_metrics_v2_0` | APU / Vega / older APU-style layout (soc/core/L3 temps) |
 | `2.1` | `gpu_metrics_v2_1` | APU, reordered |
 | `2.2` | `gpu_metrics_v2_2` | APU, adds independent throttle status |
@@ -223,7 +223,7 @@ an acceleration path, never a requirement. When absent or unparseable, the sysfs
 
 ## 6. `gpu_metrics` binary format
 
-### 6.1 Layout — **verified empirically** against a live Navi 44
+### 6.1 Layout — **verified empirically** against a live Navi 21 / RX 6800
 
 The file begins with a 4-byte common header:
 
@@ -275,9 +275,15 @@ Unsupported fields are **not** zero. Observed sentinels in the live file:
 A parser that renders these as real values will display "65535 MHz" and "65.535 °C".
 **Every field must therefore be sentinel-checked and mapped to `N/A`.**
 
-Additionally, some populated fields are semantically invalid on a given ASIC — e.g.
-`voltage_gfx` decoded as `6` mV on an RDNA 3 card that has no discrete GFX voltage rail in that
-field. Values below a plausible per-field floor are also treated as `N/A` (see DESIGN.md §6.4).
+Additionally, some *populated* fields are semantically invalid on a given ASIC: a field can
+be present in the struct and still hold a physically meaningless value. Values below a
+plausible per-field floor are therefore treated as `N/A` (see DESIGN.md §6.4).
+
+> **Correction.** An earlier draft of this section cited `voltage_gfx` decoding as `6` mV on a
+> card "with no discrete GFX voltage rail". That was not a hardware property — it was our own
+> misparse, caused by a two-byte offset error in the voltage block. The same card reports a
+> perfectly normal `768` mV on that rail. The floor check is kept as cheap insurance against
+> genuinely absent rails, but this example is withdrawn.
 
 ### 6.3 Forward compatibility
 
@@ -383,7 +389,7 @@ kind = "auto"
 default_index = 0
 # override the marketing name shown in the header
 # [gpu.names]
-# "0000:0c:00.0" = "Navi 44 XTX"
+# "0000:0c:00.0" = "AMD Radeon RX 6800"
 
 [process]
 show = true
@@ -428,7 +434,7 @@ log_level = "info"
 ## 11. Acceptance criteria
 
 1. `uv run pytest` green, including fixtures for `gpu_metrics` **v1.0, v1.1, v1.2, v1.3, v2.0,
-   v2.1, v2.2**, a truncated buffer, an unknown `3.x` header, and the **real 120-byte Navi 44 blob**
+   v2.1, v2.2**, a truncated buffer, an unknown `3.x` header, and the **real 120-byte Navi 21 blob**
    captured from the reference machine.
 2. All sentinel values (`0xFFFF`, `0xFFFFFFFF`, `0xFFFF_FFFF_FFFF_FFFF`) decode to `None`.
 3. The real blob decodes to `edge=51 °C`, `hotspot=58 °C`, `socket_power=33 W`, `uclk=1000 MHz`,

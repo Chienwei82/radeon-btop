@@ -143,7 +143,7 @@ class TestScreenSnapshot:
 
     def test_header_shows_identity_and_timing(self, drm_root: Path, proc_root: Path) -> None:
         text = self.screen(drm_root, proc_root)
-        assert "AMD Radeon Navi 44" in text
+        assert "AMD Radeon RX 6800" in text
         assert "amdgpu" in text
         assert "0000:0c:00.0" in text
         assert "0x73bf" in text
@@ -284,7 +284,7 @@ class TestThemes:
 
         ansi, text = capture(app, (120, 40), body)
         assert ansi is True
-        assert "AMD Radeon Navi 44" in text
+        assert "AMD Radeon RX 6800" in text
         assert "2,200 MHz" in text
 
 
@@ -326,7 +326,7 @@ class TestResponsiveness:
 
     def test_very_small_terminal_still_renders(self, drm_root: Path, proc_root: Path) -> None:
         text = self.screen(drm_root, proc_root, (40, 12))
-        assert "AMD Radeon Navi 44" in text
+        assert "AMD Radeon RX 6800" in text
 
 
 class TestActions:

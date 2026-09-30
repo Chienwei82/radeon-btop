@@ -8,7 +8,7 @@ from tests.conftest import make_gpu, pci_root_for
 #: A Carrizo-class APU id, present in the APU set.
 APU_DEVICE_ID = 0x1638
 
-#: A Navi 44 class dGPU id.
+#: A Navi 21 / RX 6800 class dGPU id.
 DGPU_DEVICE_ID = 0x73BF
 
 
@@ -25,7 +25,7 @@ def test_single_discrete_gpu(drm_root: Path) -> None:
     assert device.bdf == "0000:0c:00.0"
     assert device.vendor_id == 0x1002
     assert device.device_id == DGPU_DEVICE_ID
-    assert device.name == "AMD Radeon Navi 44"
+    assert device.name == "AMD Radeon RX 6800"
     assert device.kind == "dgpu"
     assert not device.is_integrated
     assert device.supports_fan
@@ -243,7 +243,7 @@ def test_device_label_includes_bdf(drm_root: Path) -> None:
     make_gpu(drm_root, bdf="0000:0c:00.0")
     device = discover_devices(drm_root, pci_root=pci_root_for(drm_root))[0]
 
-    assert device.label() == "AMD Radeon Navi 44 (0000:0c:00.0)"
+    assert device.label() == "AMD Radeon RX 6800 (0000:0c:00.0)"
 
 
 def test_device_without_metrics_file_still_discovered(drm_root: Path) -> None:

@@ -24,7 +24,7 @@ V1_3 = ABI_REGISTRY[(1, 3)]
 
 
 def test_v1_3_offsets_match_hardware() -> None:
-    """The aligner must reproduce the byte offsets read off a real Navi 44 table."""
+    """The aligner must reproduce the byte offsets read off a real Navi 21 table."""
     for name, expected in V1_3_OFFSETS.items():
         assert V1_3.field_map[name] == expected, f"{name} at wrong offset"
 
@@ -140,7 +140,7 @@ def test_implausible_clock_is_rejected() -> None:
 
 
 def test_absent_voltage_rail_is_rejected() -> None:
-    """RDNA 3 has no discrete GFX voltage rail; a near-zero value must not be shown."""
+    """A sub-rail voltage means the field is absent; it must not be shown."""
     blob = build_metric_table(V1_3, {"voltage_soc": 918, "voltage_gfx": 0, "voltage_mem": 900})
     parsed = GpuMetricsParser().parse(blob)
 
@@ -260,7 +260,7 @@ def test_parse_file_on_unreadable_path_returns_none(tmp_path) -> None:
 def test_real_hardware_blob_decodes() -> None:
     """A capture of the reference machine's exact metric values decodes correctly.
 
-    These are the readings a Navi 44 produced while a browser was running: 49/56/52
+    These are the readings a Navi 21 produced while a browser was running: 49/56/52
     degrees on edge/junction/mem, 33 W, 918/768/900 mV, PCIe Gen5 x16.  Regression-guarding
     them catches any aligner change that would silently shift every 64-bit field.
     """
