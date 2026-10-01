@@ -8,22 +8,26 @@ count rather than a sleep, so the suite is neither slow nor timing-dependent.
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 from textual.pilot import Pilot
+from textual.widgets import Footer
 
 from gputop.config import Config, GeneralConfig, GpuConfig, ProcessConfig, UiConfig
+from gputop.model.alerts import AlertLevel
 from gputop.readers import discovery, fsutil, procfs
 from gputop.sampler import SamplerOptions
-from gputop.ui.app import GpuTopApp, short_bdf
+from gputop.ui.app import MIN_HEIGHT_AROUND_UTIL_GRAPH, MIN_UTIL_GRAPH, GpuTopApp, short_bdf
 from gputop.ui.theme import THEMES, theme_names
 from gputop.ui.widgets import BrailleGraph
-from tests.conftest import make_gpu, make_process
-from tests.snapshot import run_app, screen_lines, widget_text
+from tests.conftest import engine_line, make_gpu, make_process
+from tests.snapshot import run_app, screen_lines, wait_until, widget_text
 
 GiB = 1024**3
+MiB = 1024**2
 
 #: A fixed, fully populated metric table so the screen is reproducible.
 FIXED_METRICS = {
@@ -60,7 +64,12 @@ FIXED_SYSFS = {
 
 
 def build_hardware(drm_root: Path, proc_root: Path) -> None:
-    """Create one deterministic GPU and one deterministic client."""
+    """Create one deterministic GPU and one deterministic client.
+
+    The client is given resident memory rather than left at zero: a real DRM client
+    always holds some, and the table hides clients that are demonstrably doing nothing,
+    so a zero-memory fixture would describe a process gputop deliberately does not show.
+    """
     make_gpu(
         drm_root,
         bdf="0000:0c:00.0",
@@ -69,7 +78,17 @@ def build_hardware(drm_root: Path, proc_root: Path) -> None:
         hwmon=FIXED_HWMON,
         extra_sysfs=FIXED_SYSFS,
     )
-    make_process(proc_root, 4242, name="renderfarm")
+    make_process(
+        proc_root,
+        4242,
+        name="renderfarm",
+        cmdline=["/usr/bin/renderfarm", "--scene", "42"],
+        fdinfo=[
+            f"drm-resident-vram: {256 * MiB} B",
+            f"drm-resident-gtt: {64 * MiB} B",
+            engine_line("gfx", 500_000_000),
+        ],
+    )
 
 
 def make_config(**ui: object) -> Config:
@@ -155,6 +174,38 @@ class TestScreenSnapshot:
         assert "╭" in text and "╮" in text
         assert "╰" in text and "╯" in text
 
+    def test_the_alert_flash_reaches_every_bordered_panel(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """Two bordered boxes were not ``Panel`` instances and so were never selected.
+
+        ``#vram-panel`` and ``#gtt-panel`` are plain ``Vertical``\\s with their border in
+        the stylesheet, and the flash queried ``query(Panel)``.  Two of seven boxes kept
+        the calm colour while the rest flashed, which is the one thing a border flash is
+        not supposed to do: the docstring's own rule is that "one border that changes says
+        'this screen'".
+        """
+        app = make_app(drm_root, proc_root)
+
+        async def body(_pilot: Pilot[Any]) -> list[str]:
+            panels = list(app.query(".panel"))
+            assert panels, "no bordered panels found"
+            app._alert_state = replace(app._alert_state, level=AlertLevel.ALERT)
+            app._flash_on = True
+            app._apply_alert_borders()
+            borders = [str(p.styles.border) for p in panels]
+            # The two that were never ``Panel`` instances, named explicitly: they are the
+            # ones a type-based query could not reach.
+            for panel_id in ("vram-panel", "gtt-panel"):
+                assert str(app.query_one(f"#{panel_id}").styles.border) == borders[0]
+            return borders
+
+        borders = capture(app, (120, 40), body)
+        assert len(borders) == 7
+        assert all(border == borders[0] for border in borders), (
+            "not every panel border carries the alert colour"
+        )
+
     def test_all_panels_are_present(self, drm_root: Path, proc_root: Path) -> None:
         text = self.screen(drm_root, proc_root)
         for title in ("GPU utilisation", "VRAM", "GTT", "Sensors", "PID"):
@@ -237,8 +288,188 @@ class TestGraphs:
         assert values[-1] == pytest.approx(37.0, abs=0.5)
 
 
+class TestGraphHeight:
+    """``ui.graph_height``: 0 fills the layout, a positive value pins the graph."""
+
+    def _graph_height(
+        self,
+        drm_root: Path,
+        proc_root: Path,
+        size: tuple[int, int],
+        **ui: object,
+    ) -> int:
+        app = make_app(drm_root, proc_root, **ui)
+
+        async def body(_pilot: Pilot[Any]) -> int:
+            return app.query_one("#util-graph", BrailleGraph).size.height
+
+        return capture(app, size, body)
+
+    def test_the_default_is_unchanged_by_the_key(self, drm_root: Path, proc_root: Path) -> None:
+        """``0`` is the documented default and must render exactly as before it existed.
+
+        The measured baseline: the graph is terminal-driven, not fixed, so pinning 10 rows
+        by default would have made it taller than it has always been on a big terminal.
+        """
+        assert self._graph_height(drm_root, proc_root, (120, 40)) == 6
+        assert self._graph_height(drm_root, proc_root, (120, 40), graph_height=0) == 6
+
+    def test_a_positive_value_pins_the_graph(self, drm_root: Path, proc_root: Path) -> None:
+        """The point of the key: a tall graph that does not shrink on every resize."""
+        assert self._graph_height(drm_root, proc_root, (120, 60), graph_height=14) == 14
+
+    def test_a_pinned_graph_is_clamped_rather_than_allowed_to_overflow(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """A fixed height that overflows pushes the process table and footer off-screen.
+
+        That is the one thing the responsive layout exists to prevent, so the request is
+        reduced to what the terminal can spare rather than honoured literally.
+        """
+        height = self._graph_height(drm_root, proc_root, (120, 30), graph_height=40)
+
+        assert height == 30 - MIN_HEIGHT_AROUND_UTIL_GRAPH
+
+    @pytest.mark.parametrize("rows", [24, 20])
+    def test_a_pinned_graph_never_pushes_the_footer_off_the_screen(
+        self, drm_root: Path, proc_root: Path, rows: int
+    ) -> None:
+        """The failure mode, asserted rather than inferred from the height arithmetic.
+
+        The graph is also asserted to have real height, so this cannot pass vacuously by
+        a layout that simply ignored the key -- which would keep the footer on screen for
+        the wrong reason.
+        """
+        app = make_app(drm_root, proc_root, graph_height=40)
+
+        async def body(_pilot: Pilot[Any]) -> tuple[int, int, int]:
+            footer = app.query_one(Footer).region
+            return (
+                footer.y + footer.height,
+                app.screen.size.height,
+                app.query_one("#util-graph", BrailleGraph).size.height,
+            )
+
+        bottom, screen, graph = capture(app, (100, rows), body)
+
+        assert graph >= MIN_UTIL_GRAPH
+        assert bottom <= screen, f"footer ends at row {bottom} of {screen}"
+
+    def test_a_pinned_graph_never_goes_below_the_minimum(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """A terminal with nothing to spare still gets a readable graph, not a sliver."""
+        assert (
+            self._graph_height(drm_root, proc_root, (80, 20), graph_height=40) >= MIN_UTIL_GRAPH
+        )
+
+    @pytest.mark.parametrize("pinned", [12, 18, 40])
+    def test_a_pinned_graph_does_not_crop_the_readout(
+        self, drm_root: Path, proc_root: Path, pinned: int
+    ) -> None:
+        """The panel has to grow to *hold* the graph, not merely contain it.
+
+        The graph is not the whole panel: there is a title above it and the GPU and VRAM
+        readout lines below.  Pinning the graph alone grew the plot and silently deleted
+        the two numbers under it -- and every other measurement still looked correct,
+        because a cropped child of a fixed-height box reports the size it was given.
+        """
+        app = make_app(drm_root, proc_root, graph_height=pinned)
+
+        async def body(_pilot: Pilot[Any]) -> bool:
+            readout = app.query_one("#util-readout")
+            panel = app.query_one("#util-panel")
+            return readout.size.height > 0 and readout.region.bottom <= panel.region.bottom
+
+        assert capture(app, (120, 60), body), f"readout cropped at graph_height={pinned}"
+
+
+class TestGraphHistoryCapacity:
+    """How many samples a graph holds is one number, not two."""
+
+    @pytest.mark.parametrize("points", [16, 64, 128])
+    def test_the_graphs_hold_exactly_as_many_points_as_the_sampler_keeps(
+        self, drm_root: Path, proc_root: Path, points: int
+    ) -> None:
+        """``history_points`` drives the graphs as well as the buffer.
+
+        There used to be a second ``graph_history`` key under ``[ui]`` that nothing read.
+        Wiring the capacity to the one live number is what makes lowering it do anything:
+        the graph's own deque was left at a fixed 300, so a config asking for 64 samples
+        kept a deque of 300 that could only ever be 64 full.
+        """
+        app = make_app(drm_root, proc_root)
+        app._config = replace(
+            app._config,
+            general=replace(app._config.general, history_points=points),
+            gpu=app._config.gpu,
+        )
+        app._sampler._options = replace(app._sampler.options, history_length=points)
+
+        async def body(_pilot: Pilot[Any]) -> list[int]:
+            return [
+                app.query_one(widget_id, BrailleGraph)._capacity
+                for widget_id in ("#util-graph", "#vram-graph", "#gtt-graph")
+            ]
+
+        assert set(capture(app, (120, 40), body)) == {points}
+
+
 class TestThemes:
     """Runtime theme switching and the config surface."""
+
+    def test_the_palette_reaches_css_without_destroying_textuals_own(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """The palette is merged, never assigned over the framework's variable map.
+
+        ``Stylesheet.set_variables`` *replaces* the map: calling it with three names left
+        three entries where Textual had 168, so every rule referencing a design token --
+        ``$background`` in Textual's own default ``App`` rule -- failed to resolve on the
+        next re-parse, which is any modal.  The app's own comment next to the alert flash
+        describes this exact hazard, and then the theme change did it anyway.
+        """
+        app = make_app(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> list[int]:
+            before = len(app.stylesheet._variables)
+            await pilot.press("m")
+            after = len(app.stylesheet._variables)
+            await pilot.press("question_mark")
+            return [before, after, len(app.stylesheet._variables)]
+
+        before, after, after_modal = capture(app, (120, 40), body)
+        assert before > 100, "Textual's design tokens should be present at start-up"
+        assert after == before, "a theme change discarded the variable map"
+        assert after_modal == before, "pushing a screen discarded the variable map"
+
+    def test_the_theme_is_in_effect_before_any_key_is_pressed(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """``$accent`` used to resolve to Textual's stock orange until the user pressed ``m``.
+
+        The variables were only pushed from an action, so a fresh launch rendered in the
+        framework's palette rather than the configured one.
+        """
+        app = make_app(drm_root, proc_root)
+
+        async def body(_pilot: Pilot[Any]) -> list[str]:
+            return [app.get_css_variables()["accent"]]
+
+        assert capture(app, (120, 40), body) == [app._theme.accent]
+
+    def test_a_modal_pushes_without_an_unresolved_variable_error(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """The re-parse that a screen push triggers is where a lost variable blows up."""
+        app = make_app(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> list[str]:
+            await pilot.press("question_mark")
+            await pilot.pause()
+            return [app.screen.__class__.__name__]
+
+        assert capture(app, (120, 40), body)  # would raise on an unresolved variable
 
     def test_cycle_visits_every_theme(self, drm_root: Path, proc_root: Path) -> None:
         app = make_app(drm_root, proc_root)
@@ -305,6 +536,29 @@ class TestResponsiveness:
         assert "Sensors" in text
         assert "PID" in text
 
+    def test_the_layout_is_not_recomputed_while_nothing_changes(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """Layout is a pure function of size and toggles, so a steady state writes nothing.
+
+        It used to re-assert seven inline styles on every sample.  Each one marks a
+        widget dirty in Textual, which costs a stylesheet re-resolve and a repaint of the
+        two largest panels per tick -- for a layout that had not changed.
+        """
+        app = make_app(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> tuple[int, int]:
+            await wait_until(lambda: app._layout_key is not None, what="first layout")
+            first = app._layout_key
+            # Two more samples; the key must not move and the styles must not be rewritten.
+            await wait_until(lambda: app._sampler.stats.ticks >= 3, what="three samples")
+            assert app._layout_key == first
+            return app._sampler.stats.ticks, 0 if first is None else 1
+
+        ticks, laid_out = capture(app, (120, 40), body)
+        assert ticks >= 3
+        assert laid_out == 1
+
     def test_narrow_layout_keeps_every_panel(self, drm_root: Path, proc_root: Path) -> None:
         """A narrow terminal stacks the panels rather than losing them."""
         text = self.screen(drm_root, proc_root, (64, 44))
@@ -345,11 +599,12 @@ class TestActions:
         assert after is False
 
     def test_refresh_now_produces_a_sample(self, drm_root: Path, proc_root: Path) -> None:
+        """``R`` forces an immediate sample, without waiting for the interval."""
         app = make_app(drm_root, proc_root)
 
         async def body(pilot: Pilot[Any]) -> int:
             before = app._sampler.stats.ticks
-            await pilot.press("r")
+            await pilot.press("R")
             return app._sampler.stats.ticks - before
 
         assert capture(app, (120, 40), body) >= 1

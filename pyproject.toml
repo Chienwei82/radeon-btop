@@ -5,26 +5,74 @@ description = "A btop-style TUI monitor for AMD Radeon GPUs (amdgpu driver)."
 readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "GPL-3.0-or-later" }
+keywords = ["gpu", "amd", "amdgpu", "radeon", "tui", "monitor", "textual", "rocm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.14",
+    # gputop itself runs and passes its full suite on 3.14t, but Textual and Rich have
+    # no free-threaded CI upstream, so "beta" is the honest claim rather than a
+    # stronger one this project cannot evidence for its dependencies.
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Hardware",
+    "Topic :: System :: Monitoring",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+# Pinned with an upper bound on purpose, not as a habit:
+#
+#   textual  >=8.2.8  Python 3.14 support landed in 6.3.0 (issue #5797: `App.run()`
+#               stopped working once 3.14 removed implicit event-loop creation), and
+#               8.x moves fast.  <9 so a release that changes the reactive or message
+#               model cannot arrive inside a patch release.
+#   rich     >=15.0.0 Textual 8.2.8 itself requires rich>=14.2.0, which is where Rich's
+#               own 3.14 fix landed (PR #3861).  <16 for the same reason.
+#   tomli-w  >=1.2.0  Pure stdlib wrapper, nothing to gain from a newer major.
+#
+# Both are pure-Python wheels, which is also why they work unchanged on the
+# free-threaded build: there is no cp314t wheel to wait for, and no C extension whose
+# GIL-free status has to be trusted.  Textual and Rich are *not* tested upstream on
+# 3.14t, so the 3.14t job in CI is this project's evidence, not theirs.
 dependencies = [
-    "textual>=1.0",
+    "textual>=8.2.8,<9",
+    "rich>=15.0.0,<16",
+    "tomli-w>=1.2.0,<2",
 ]
 
 [project.scripts]
 gputop = "gputop.__main__:main"
 
+[project.urls]
+Homepage = "https://github.com/gputop/gputop"
+Issues = "https://github.com/gputop/gputop/issues"
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.4,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gputop"]
 
+[tool.hatch.build.targets.sdist]
+include = ["src/gputop", "tests", "tools", "packaging", "docs", "README.md"]
+
+# Pinned for the same reason as the runtime dependencies, with one extra:
+# mypy >= 2.3.1 is the first release shipping compiled ``cp314t`` wheels, so a lower
+# floor silently costs 3-5x on the free-threaded job.  pytest-timeout 2.4.0 has not yet
+# published a 3.14 classifier upstream even though the support is merged; it is pure
+# Python and uses nothing removed in 3.14, and it is the reason the suite cannot hang.
 [dependency-groups]
 dev = [
-    "pytest>=8.3",
-    "mypy>=1.13",
-    "ruff>=0.8",
-    "pytest-timeout>=2.3",
+    "pytest>=9.1.1,<10",
+    "pytest-timeout>=2.4.0,<3",
+    "mypy>=2.3.1,<3",
+    "ruff>=0.16.9,<0.18",
+    "hatchling>=1.32.4,<2",
 ]
 
 # ---------------------------------------------------------------------------
@@ -73,6 +121,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "B011"]
+# The /proc scan visits every process on the machine and reads one symlink per open
+# descriptor, so it is written against the os string APIs rather than pathlib: wrapping
+# each of those syscalls in a Path cost more than the syscall itself, and replacing it
+# with pathlib made a 1000-process scan 2.2x slower (see tools/profile_gputop.py).
+"src/gputop/readers/procfs.py" = ["PTH115", "PTH116", "PTH119", "PTH123"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["gputop"]

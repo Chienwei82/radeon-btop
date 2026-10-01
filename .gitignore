@@ -13,6 +13,8 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.uv-cache/
+.profiles/
 .coverage
 htmlcov/
 

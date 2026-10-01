@@ -11,6 +11,14 @@ The kernel exposes two things that make this possible without root:
 
 ``drm-pdev`` routes each client to a specific GPU, which is what makes multi-GPU and
 dGPU+APU accounting correct rather than a single blended number.
+
+**Cost.**  This is the only part of a sample whose price grows with the size of the
+*system* rather than with the number of GPUs: it visits every process and reads one
+symlink per open descriptor.  Profiling a synthetic 1000-process machine (``tools/
+profile_gputop.py procfs --scaling``) put it at ~25 us per process, roughly 25 ms per
+tick for a typical desktop.  Everything here is therefore written against ``os`` string
+APIs rather than ``pathlib``: a ``Path`` per descriptor cost more than the syscall it was
+wrapping.  The measured result of that change is recorded in the README.
 """
 
 import os
@@ -27,10 +35,12 @@ _ENGINE_ACTIVE_KEY = re.compile(r"^drm-engine-active-([a-z0-9_]+)$")
 _ENGINE_PERIOD_KEY = re.compile(r"^drm-engine-period-([a-z0-9_]+)$")
 _ENGINE_KEY = re.compile(r"^drm-engine-([a-z0-9_]+)$")
 
-#: A descriptor is on a GPU when its target is under ``/dev/dri``.  Matching on the
+#: A descriptor is on a GPU when its target lives under ``/dev/dri``.  Matching on the
 #: substring rather than a suffix matters: the target is ``/dev/dri/renderD128``, so a
-#: suffix test against ``/dri/renderD`` can never match.
-DRM_NODE_MARKERS = ("/dev/dri/renderD", "/dev/dri/card")
+#: suffix test against ``/dri/renderD`` can never match.  One prefix test rather than one
+#: per node type, because everything under that directory *is* a DRM node, and the
+#: parser below still insists the driver is amdgpu.
+DRM_DIR = "/dev/dri/"
 
 #: Driver engine names mapped onto the display buckets.  Anything unrecognised becomes
 #: ``other`` but keeps its raw name, so a new engine still shows up instead of vanishing.
@@ -86,6 +96,8 @@ class _ClientAccumulator:
     user: str
     bdf: Bdf
     client_id: ClientId
+    cmdline: tuple[str, ...] = ()
+    ppid: int | None = None
     engines: dict[str, int] = field(default_factory=dict)
     memory: dict[str, int] = field(default_factory=dict)
 
@@ -178,8 +190,9 @@ def parse_fdinfo(text: str) -> FdinfoRecord | None:
     if driver != "amdgpu":
         return None
 
-    # Newer kernels report active/period pairs directly, which are authoritative when
-    # present; otherwise fall back to the cumulative total.
+    # amdgpu emits only ``drm-engine-<name>``.  The active/period pair is accepted
+    # defensively, for a driver that reports a busy window directly rather than a
+    # cumulative total, and it wins when present because it needs no baseline.
     for name, busy in active.items():
         window = period.get(name, 0)
         if window > 0:
@@ -207,15 +220,20 @@ class ProcessCollector:
 
     def __init__(self, proc_root: Path = Path("/proc")) -> None:
         self._proc_root = proc_root
+        # The scan works in ``str`` paths, not ``Path`` ones: it visits every process on
+        # the machine, so a handful of microseconds of ``pathlib`` construction per
+        # descriptor was measurable against the syscall it was wrapping.  Kept as both
+        # forms so the public constructor still takes a ``Path``.
+        self._root = os.fspath(proc_root)
         # Per-client cumulative engine counters from the previous scan.  One window for
         # the whole scan, so a single timestamp is enough.
         self._previous: dict[tuple[Bdf, ClientId], dict[str, int]] = {}
         # ``None`` rather than 0 means "no sample yet": a timestamp of exactly 0 is a
         # legitimate value, so it cannot double as the has-a-baseline flag.
         self._last_scan_ns: Nanoseconds | None = None
-        # Rebuilt for every scan.  Instance state, not module state, so that two
-        # collectors (as used by the tests) never share mutable data.
-        self._fdinfo_names: dict[Path, frozenset[str]] = {}
+        # uid -> user name, resolved once.  ``pwd.getpwuid`` is an NSS lookup, and a scan
+        # would otherwise repeat it for every client on every tick.
+        self._users: dict[int, str] = {}
 
     def reset(self) -> None:
         """Forget the delta baseline, e.g. after a device rescan."""
@@ -239,24 +257,6 @@ class ProcessCollector:
         processes = self._build_processes(clients, now_ns)
         return processes, visible_count, total_count
 
-    def _fdinfo_names_for(self, fdinfo_dir: Path) -> frozenset[str]:
-        """List the ``fdinfo`` entries available for one process.
-
-        Memoised per scan so that a process holding several DRM descriptors does not
-        trigger a ``scandir`` per descriptor.  The cache is cleared at the start of every
-        scan, because a descriptor opened by a live process must not stay invisible for
-        the rest of the run.
-        """
-        cached = self._fdinfo_names.get(fdinfo_dir)
-        if cached is not None:
-            return cached
-        try:
-            names = frozenset(entry.name for entry in os.scandir(fdinfo_dir))
-        except OSError, ValueError:
-            names = frozenset()
-        self._fdinfo_names[fdinfo_dir] = names
-        return names
-
     def _scan_clients(self) -> tuple[dict[tuple[Bdf, ClientId], _ClientAccumulator], int, int]:
         """Walk ``/proc`` and merge every DRM record by ``(pdev, client-id)``."""
         clients: dict[tuple[Bdf, ClientId], _ClientAccumulator] = {}
@@ -264,54 +264,65 @@ class ProcessCollector:
         visible_count = 0
 
         try:
-            entries = list(os.scandir(self._proc_root))
+            # ``scandir`` yields the full path on each entry, so it is reused instead of
+            # rebuilding ``/proc/<pid>`` from the number.
+            entries = list(os.scandir(self._root))
         except OSError, ValueError:
             return clients, 0, 0
 
-        self._fdinfo_names.clear()
+        read_pid = self._read_pid
+        merge = self._merge
         for entry in entries:
-            if not entry.name.isdigit():
+            name = entry.name
+            if not name.isdigit():
                 continue
             total_count += 1
-            pid = int(entry.name)
+            pid = int(name)
             try:
-                records = self._read_pid(pid)
+                records = read_pid(entry.path)
             except OSError:
-                # The process exited between scandir and the read; skip it.
-                continue
-            except PermissionError:
-                # Another user's process: count it, but do not pretend we saw it.
+                # The process exited between scandir and the read -- and, for another
+                # user's, could not be opened at all.  Both mean "no record from here",
+                # and neither counts as visible.  A separate PermissionError clause used
+                # to sit below this one, unreachable because PermissionError is a
+                # subclass of OSError; its comment described behaviour the handler above
+                # already provided.
                 continue
             if records:
                 visible_count += 1
-            self._merge(clients, pid, records)
+                merge(clients, pid, entry.path, records)
 
         return clients, total_count, visible_count
 
-    def _read_pid(self, pid: int) -> list[FdinfoRecord]:
-        """Return every DRM fdinfo record held by one process."""
-        fd_dir = self._proc_root / str(pid) / "fd"
-        fdinfo_dir = self._proc_root / str(pid) / "fdinfo"
+    def _read_pid(self, pid_dir: str) -> list[FdinfoRecord]:
+        """Return every DRM fdinfo record held by one process.
+
+        Args:
+            pid_dir: The process directory as a string path, already known to exist.
+
+        The descriptor's *target* is what identifies a GPU client, so every open
+        descriptor costs one ``readlink``.  The previous implementation also listed the
+        ``fdinfo`` directory to confirm the descriptor had accounting data; the read
+        itself answers the same question -- an ``ENOENT`` here means the same thing -- so
+        the extra ``scandir`` per client process is gone.
+        """
         try:
-            fd_entries = list(os.scandir(fd_dir))
+            fd_entries = list(os.scandir(pid_dir + "/fd"))
         except OSError, ValueError:
             return []
 
         records: list[FdinfoRecord] = []
+        fdinfo_dir = pid_dir + "/fdinfo/"
         for fd_entry in fd_entries:
-            # ``os.scandir`` yields str paths, so re-wrap to use the Path API.
-            fd_path = Path(fd_entry.path)
             try:
-                target = fd_path.readlink().as_posix()
+                target = os.readlink(fd_entry.path)
             except OSError:
                 continue
-            if not any(marker in target for marker in DRM_NODE_MARKERS):
-                continue
-            fd_name = fd_entry.name
-            if fd_name not in self._fdinfo_names_for(fdinfo_dir):
+            if DRM_DIR not in target:
                 continue
             try:
-                text = (fdinfo_dir / fd_name).read_text(errors="replace")
+                with open(fdinfo_dir + fd_entry.name, "rb") as handle:
+                    text = handle.read().decode(errors="replace")
             except OSError, ValueError:
                 continue
             record = parse_fdinfo(text)
@@ -323,23 +334,31 @@ class ProcessCollector:
         self,
         clients: dict[tuple[Bdf, ClientId], _ClientAccumulator],
         pid: int,
+        pid_dir: str,
         records: list[FdinfoRecord],
     ) -> None:
         """Fold one process's records into the shared per-client accumulators."""
         if not records:
             return
-        name, user = _process_identity(self._proc_root / str(pid))
+        name, user, ppid, cmdline = _process_identity(pid_dir, self._users)
         for record in records:
             key = (record.pdev, record.client_id)
             acc = clients.get(key)
             if acc is None:
                 acc = _ClientAccumulator(
-                    pid=pid, name=name, user=user, bdf=record.pdev, client_id=record.client_id
+                    pid=pid,
+                    name=name,
+                    user=user,
+                    bdf=record.pdev,
+                    client_id=record.client_id,
+                    cmdline=cmdline,
+                    ppid=ppid,
                 )
                 clients[key] = acc
             elif pid < acc.pid:
                 # Prefer the lowest PID so the row is stable across scans.
                 acc.pid, acc.name, acc.user = pid, name, user
+                acc.cmdline, acc.ppid = cmdline, ppid
             # Maximum, never sum: two fds onto one client report the same totals.
             for engine, total_ns in record.engines.items():
                 previous = acc.engines.get(engine)
@@ -383,6 +402,8 @@ class ProcessCollector:
                     user=acc.user,
                     bdf=acc.bdf,
                     client_id=acc.client_id,
+                    cmdline=acc.cmdline,
+                    ppid=acc.ppid,
                     engines=tuple(usage),
                     vram_used=_preferred(acc.memory, "drm-resident-vram", "drm-total-vram"),
                     vram_shared=acc.memory.get("drm-shared-vram"),
@@ -408,27 +429,68 @@ def _sort_key(process: GpuProcess) -> tuple[float, int, int]:
     return (-process.engine_percent, -process.memory_used, process.pid)
 
 
-def _process_identity(pid_dir: Path) -> tuple[str, str]:
-    """Return ``(name, user)`` for a process, tolerating a vanished process."""
+def _process_identity(
+    pid_dir: str, users: dict[int, str]
+) -> tuple[str, str, int | None, tuple[str, ...]]:
+    """Return ``(name, user, ppid, cmdline)`` for a process, tolerating a vanished one.
+
+    ``status`` is read because ``PPid`` lives there and only there, and the process tree is
+    built from it.  It is read for processes that hold a DRM descriptor and for no others,
+    so the extra read is bounded by the size of the table, not by the size of ``/proc``.
+    ``comm`` is preferred for the name because it needs no parsing, and is still the
+    fallback chain the kernel itself documents.
+
+    Args:
+        pid_dir: Process directory as a string path.
+        users: uid -> name cache owned by the collector, so an NSS lookup happens once per
+            uid per run rather than once per client per tick.
+    """
     name = ""
+    ppid: int | None = None
     try:
-        name = (pid_dir / "comm").read_text(errors="replace").strip()
+        with open(pid_dir + "/comm", "rb") as handle:
+            name = handle.read().decode(errors="replace").strip()
     except OSError, ValueError:
         name = ""
+    try:
+        with open(pid_dir + "/status", "rb") as handle:
+            status = handle.read().decode(errors="replace")
+    except OSError, ValueError:
+        status = ""
+    for line in status.splitlines():
+        if line.startswith("Name:") and not name:
+            name = line.partition(":")[2].strip()
+        elif line.startswith("PPid:"):
+            ppid = _leading_int(line.partition(":")[2])
     if not name:
-        try:
-            status = (pid_dir / "status").read_text(errors="replace")
-        except OSError, ValueError:
-            status = ""
-        for line in status.splitlines():
-            if line.startswith("Name:"):
-                name = line.partition(":")[2].strip()
-                break
-    if not name:
-        name = pid_dir.name
+        name = os.path.basename(pid_dir)
 
     try:
-        user = pwd.getpwuid(pid_dir.stat().st_uid).pw_name
-    except OSError, ValueError, KeyError:
-        user = "?"
-    return name, user
+        uid = os.stat(pid_dir).st_uid
+    except OSError, ValueError:
+        return name, "?", ppid, _read_cmdline(pid_dir)
+    user = users.get(uid)
+    if user is None:
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except OSError, ValueError, KeyError:
+            user = "?"
+        users[uid] = user
+
+    return name, user, ppid, _read_cmdline(pid_dir)
+
+
+def _read_cmdline(pid_dir: str) -> tuple[str, ...]:
+    """Read ``/proc/<pid>/cmdline`` as a list of arguments.
+
+    The file is NUL-separated with a trailing NUL, and it is **empty** for a kernel
+    thread -- which is exactly how the caller recognises one without root.  An unreadable
+    file is indistinguishable from an empty one here, and both mean "no argument vector",
+    so an empty tuple is the right answer either other way.
+    """
+    try:
+        with open(pid_dir + "/cmdline", "rb") as handle:
+            raw = handle.read()
+    except OSError, ValueError:
+        return ()
+    return tuple(part for part in raw.decode(errors="replace").split("\0") if part)

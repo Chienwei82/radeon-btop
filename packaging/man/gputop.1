@@ -1,0 +1,583 @@
+.\" Manual page for gputop.
+.\"
+.\" Every option documented here is registered by build_parser() in src/gputop/cli.py and
+.\" every default quoted here is the dataclass default in src/gputop/config.py.  The
+.\" interactive keys are the BINDINGS list in src/gputop/ui/app.py.
+.TH gputop 1 "2026-09-30" "gputop 0.1.0" "User Commands"
+.SH NAME
+gputop \- a terminal monitor for AMD Radeon GPUs driven by the amdgpu kernel driver
+.SH SYNOPSIS
+.B gputop
+.RI [ options ]
+.br
+.B gputop
+.B \-\-dump
+.RI [ options ]
+.br
+.B gputop
+.B \-\-devices
+.RI [ options ]
+.br
+.B gputop
+.B \-\-check
+.RI [ \-\-json ]
+.RI [ options ]
+.br
+.B gputop \-\-version
+.SH DESCRIPTION
+.B gputop
+shows what the Radeon cards in this machine are doing: utilisation, clocks, temperatures,
+power draw against the enforced cap, throttle reasons, and the DRM clients holding a
+descriptor, with the GPU time and memory attributed to each of them. With no arguments it
+starts a Textual interface that updates in place. The panels are laid out to survive a
+narrow or a short terminal, and the last two of them are conditional, because a panel
+that is merely turned off should say nothing at all.
+.PP
+Everything is read from
+.IR /sys/class/drm/card*/device/
+and from
+.IR /proc/<pid>/fdinfo/ ,
+and nothing is ever written to either. A monitor that quietly reprograms a GPU is not a
+monitor, so there is no write path in this program: the power-profile and overdrive tables
+are read because they are interesting, not because they can be set.
+.PP
+The interface itself is unprivileged. The one exception is the optional per-block panel:
+the amdgpu driver exposes its per-block busy counters only through a privileged radeon
+ioctl, so when it is enabled
+.B gputop
+runs
+.B radeontop \-d \-
+as a child process and parses its dump output. That child inherits whatever privilege
+.B radeontop
+needs, and
+.B gputop
+itself never does. The panel is off by default, because a default-on panel would put a
+permanent complaint in the status line of every user whose
+.B radeontop
+answers "are you root?", and because opting in stops
+.B gputop
+from launching a process that reaches for the GPU the moment it starts.
+.PP
+Three modes exist for scripts and bug reports rather than for watching:
+.B \-\-devices
+lists the cards,
+.B \-\-dump
+writes one JSON snapshot of the live machine,
+and
+.B \-\-check
+reports which metrics this machine can provide, and why any of them are missing. Each of
+the three prints to stdout and exits.
+.PP
+Requirements: Linux with
+.BR CONFIG_DRM_AMDGPU ,
+kernel 5.19 or newer, and Python 3.14 (standard or free-threaded). Kernel 5.19 is the
+floor because that is the release which gave
+.I /proc/<pid>/fdinfo
+its DRM accounting keys
+.RB ( drm-client-id ,
+.BR drm-engine-* ,
+.BR drm-memory-* ),
+which is the whole basis of the per-process table. The binary
+.I gpu_metrics
+table arrived later, in 6.10; without it the interface still works, one sysfs attribute at
+a time, and
+.B gputop \-\-check
+says so rather than leaving you to guess why one number is missing.
+.SH OPTIONS
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.B \-c \fIPATH\fR, \-\-config \fIPATH\fR
+Read the configuration from
+.I PATH
+instead of searching the default locations described under CONFIGURATION. Naming a file
+also means naming the whole configuration: the saved
+.B [state]
+section is not layered on top of it, so a scripted run cannot inherit whatever the last
+interactive session happened to leave behind.
+.TP
+.B \-i \fISECONDS\fR, \-\-interval \fISECONDS\fR
+Sample every
+.I SECONDS
+instead of every
+.BR general.interval_ms .
+An interval below 0.05 s is raised to it: a faster tick would spend more time in procfs
+than collecting data, and the procfs scan is the expensive part of a sample.
+.TP
+.B \-\-drm\-root \fIPATH\fR
+Take the sysfs DRM class directory from
+.I PATH
+rather than
+.BR /sys/class/drm .
+Useful for testing against a captured tree.
+.TP
+.B \-\-proc\-root \fIPATH\fR
+Take the procfs mount point from
+.I PATH
+rather than
+.BR /proc .
+Useful for the same reason.
+.TP
+.B \-\-dump
+Write one JSON snapshot of the live machine to stdout and exit. Engine utilisation is a
+difference between two samples, so this takes two samples with one interval between them;
+without the wait every engine would read 0%. Optional readings are emitted as
+.B null
+rather than omitted, so a consumer can tell "not available on this hardware" apart from
+"not collected".
+.TP
+.B \-\-devices
+Write a JSON list of the discovered GPUs to stdout and exit, with the PCI address of each
+card. That address is the key
+.B [gpu.names]
+uses to rename a card, and the card number here is the one the interface shows.
+.TP
+.BI \-\-kind " {auto,igpu,dgpu}"
+Classify every device as integrated or discrete regardless of what the heuristics decide.
+.I auto
+leaves them to the heuristics;
+.I igpu
+and
+.I dgpu
+force the answer, which is what an APU the probes misjudge needs.
+.TP
+.BI \-\-theme " NAME"
+Use the colour theme
+.IR NAME :
+.BR default ,
+.B dracula
+or
+.B gruvbox
+(the default is
+.BR default ).
+The same key,
+.BR m ,
+cycles the theme at run time, and the choice is remembered in the
+.B [state]
+section.
+.TP
+.B \-\-no\-color
+Disable 24-bit colour and fall back to the terminal's own ANSI palette. The same setting
+is
+.BR ui.no_color .
+.TP
+.B \-\-no\-processes
+Skip the
+.B /proc
+scan, which is the most expensive part of a sample. The process table is then empty and
+every other panel still works, which is the point when the sampler is running on a timer
+or a machine with many processes.
+.TP
+.B \-\-pretty
+Indent
+.B \-\-dump
+and
+.B \-\-devices
+output for human reading. Not for parsing.
+.TP
+.B \-\-blocks
+Force the per-block panel on for this run, overriding
+.BR blocks.enabled ,
+and start
+.B radeontop
+if it is installed. When it cannot run, the panel is hidden rather than drawn empty and the
+status line names which of the four reasons applies: not installed, not permitted,
+unsupported card, or failed.
+.TP
+.B \-\-no\-blocks
+Never start
+.BR radeontop ,
+even when it is installed, whatever
+.B blocks.enabled
+says.
+.B \-\-blocks
+and
+.B \-\-no\-blocks
+are mutually exclusive.
+.TP
+.B \-\-log \fIPATH\fR
+Record every sample to
+.IR PATH ,
+appending and flushing per record so an interrupted session still leaves a usable file.
+The suffix before any compression suffix picks the format and the trailing suffix picks
+the transport, so the two are independent:
+.B .csv
+is CSV,
+.B .json
+is JSON Lines (one object per line, one per GPU),
+.B .csv.zst
+is the same CSV compressed. A target that cannot be opened is reported as a warning and
+recording is skipped: recording a session is not a reason to refuse to watch one.
+.TP
+.B \-\-check
+Report which metrics this machine can provide and why any are missing, then exit. The
+report is written for a bug report: a card that exposes no junction sensor, or a kernel
+without the binary metrics table, produces a permanent
+.B N/A
+on screen, and this is how you find out which file is the reason before asking.
+.TP
+.B \-\-json
+Emit the
+.B \-\-check
+report as JSON instead of text. It has no effect without
+.BR \-\-check ,
+which is the only thing that produces a report.
+.SH KEYS
+These apply to the interface, which is what
+.B gputop
+starts with no arguments. A program that takes keys has no room for a key reference
+beside it.
+.TP
+.B q
+Quit. The
+.B [state]
+section is flushed on the way out, and periodically while you watch, so the next start
+looks the way this one was left.
+.TP
+.B tab
+Next GPU. Binds ahead of the interface's own focus traversal, which would otherwise make
+the most-used multi-GPU key move the cursor.
+.TP
+.B shift+tab
+Previous GPU.
+.TP
+.B o
+Overview: every GPU at once instead of one at a time.
+.TP
+.B 1
+to
+.BR 9 ,
+Jump to GPU
+.IR n .
+.TP
+.B /
+Filter the process table by name, command, user or pid.
+.TP
+.B h ", " \&?
+Help. Also repeats the reason when an optional panel is not on screen.
+.TP
+.B R
+Resample now, instead of waiting for the next interval.
+.TP
+.B +
+Sample more often, in steps of 100 ms, down to 100 ms.
+.TP
+.B \-
+Sample less often, in the same steps, up to 10 s.
+.TP
+.B m
+Cycle the colour theme. The choice is saved.
+.TP
+.B p
+Show or hide the process table.
+.TP
+.B s
+Sort by the next column.
+.TP
+.B S
+Sort by the previous column. The selection follows the process rather than the row, so it
+stays on the same client as the table reorders.
+.TP
+.B r
+Reverse the sort.
+.TP
+.B escape
+Clear the filter.
+.TP
+.B a
+Show or hide idle clients: processes holding a DRM descriptor but using nothing measurable.
+Off by default, because such a row answers none of the questions this table exists for.
+.TP
+.B t
+Show the process table as a parent/child tree.
+.TP
+.B c
+Show the full
+.B /proc/<pid>/cmdline
+instead of the 15-character
+.B comm
+name.
+.TP
+.B up ", " \&down
+Move the selection.
+.TP
+.B k
+Send a signal to the selected process, chosen from a confirmation dialog that names the
+target. This key does nothing unless
+.B process.allow_kill
+is set, because terminating another process from a monitor is one keystroke away from
+terminating the wrong one. A kernel thread, PID 1 and
+.B gputop
+itself are refused even then.
+.SH FILES
+All of these are read-only, and none of them requires privilege.
+.TP
+.B /sys/class/drm/card*/device/
+Per-card attributes. The directory is matched by the name
+.B cardN
+alone, so connector nodes such as
+.B card1-DP-1
+are not mistaken for cards. A card is accepted only when its
+.B driver
+symlink points at
+.BR amdgpu ;
+the older
+.B radeon
+driver and every other vendor are skipped silently.
+.TP
+.B gpu_metrics
+The versioned binary metric table (v1.x and v2.x), and the source of busy percentage,
+clocks, power and temperatures when the kernel provides it.
+.TP
+.B mem_info_vis_vram_used ", " mem_info_vis_vram_total ", " mem_info_vram_total ", " mem_info_gtt_used ", " mem_info_gtt_total
+Memory pools. An integrated GPU is judged by its GTT pool, so the memory panel leads with
+GTT and de-emphasises VRAM when the card is an APU.
+.TP
+.B pp_dpm_sclk ", " pp_dpm_mclk ", " pp_dpm_socclk ", " pp_dpm_performance_level
+DPM clock tables and the current performance level. The direct
+.B current_sclk
+and
+.B current_mclk
+attributes are widely documented and absent on amdgpu, so these tables are normally the
+source, and the row marked for the active state is what is shown;
+.B gpu_metrics
+is preferred over both when the kernel exposes it.
+.TP
+.B current_* ", " pp_dpm_force_performance_level ", " current_link_width ", " current_link_speed
+Live clock, forced performance level, link width and link speed.
+.TP
+.B pp_power_profile_mode
+The SCPP profile table: the active profile, its index, and the alternatives the driver
+offers. Read, never written.
+.TP
+.B pp_od_clk_voltage
+Each clock domain's overdrive ceiling and the vddgfx offset. Also read, never written.
+.TP
+.B hwmon/hwmon*/
+Temperatures, power draw, power cap and fan. Resolved through the card's own
+.B hwmon
+symlink rather than by scanning
+.BR /sys/class/hwmon/ ,
+because only
+.B hwmon/name
+identifies the class and not the owning device.
+.TP
+.B /proc/<pid>/fdinfo/
+Per-process DRM client accounting: which card, which client id, how much VRAM and GTT it
+holds, and the per-engine busy nanoseconds the driver accumulates. Kernel threads are
+hidden because they have no argument vector, cannot be signalled, and are rarely what
+anyone is looking for.
+.TP
+.B /dev/dri
+Only consulted when the blocks panel is on, so that
+.B radeontop \-p
+can be given a DRM node. A node is preferred over a PCI bus number because the bus alone
+is ambiguous when two cards sit behind the same bridge.
+.SH CONFIGURATION
+TOML, read with the standard library's
+.IR tomllib ,
+so no parser is installed to read it. The first of these that exists is used:
+.IP \(bu 2
+.BR $GPUTOP_CONFIG
+.IP \(bu 2
+.BR ~/.config/gputop/gputop.toml
+.IP \(bu 2
+.BR ~/.gputoprc
+.PP
+A file given with
+.B \-c
+replaces the search and is read on its own. Unknown keys and out-of-range values are
+collected as warnings and ignored rather than raised, so a file written for a newer release
+still starts today. Values are clamped, not rejected, because a working configuration with
+a complaint in the status line is more useful than a refusal.
+.PP
+Each key below is optional and shown with its default.
+.TP
+.B [general]
+\fIinterval_ms\fR = 1000, \fIhistory_points\fR = 300. The sampling interval in
+milliseconds and the number of samples retained for the graphs; at one second the default
+retention is five minutes of history.
+.TP
+.B [gpu]
+\fIdevices\fR = (), \fIkind\fR = "auto", \fInames\fR = {}. Which
+cards to show, how to classify them, and a table of
+marketing names for cards the built-in table does not know, keyed by the PCI address that
+.B \-\-devices
+prints. A card is named by its full PCI address, the same address without the domain, or
+its
+.B cardN
+sysfs node; an entry matching no card is reported and ignored, and a filter matching none
+at all watches every card rather than none.
+.TP
+.B [process]
+\fIshow\fR = true, \fImax_rows\fR = 20, \fIsort\fR = "total",
+\fImin_usage_percent\fR = 0.0, \fIhide_kernel_threads\fR = true,
+\fIprocess_tree\fR = false,
+\fIfull_command\fR = false, \fIshow_idle\fR = false, \fIallow_kill\fR = false. Which
+column to sort by, how many rows to keep, and whether the table may signal a process. There
+is no flag for this section; it is a choice made once rather than per session.
+.TP
+.B [ui]
+\fItheme\fR = "default", \fIno_color\fR = false, \fIgraph_height\fR = 0. Appearance and
+graph sizing.
+.I graph_height
+is rows in the utilisation graph, where 0 -- the default -- lets it fill whatever the layout
+can spare. A positive value pins it to that many rows, clamped down rather than allowed to
+overflow the terminal. How many points each graph holds is
+.IR general.history_points ,
+and there is deliberately no second key for it: a graph cannot hold more samples than the
+sampler retains for it.
+.TP
+.B [blocks]
+\fIenabled\fR = false, \fIbinary\fR = "radeontop", \fIticks\fR = 120,
+\fIinterval_s\fR = 1, \fIdrm_root\fR = "/dev/dri", \fIrestart\fR = true. The optional
+per-block panel.
+.I interval_s
+is whole seconds only, because
+.B radeontop
+parses
+.B \-i
+with
+.IR atoi (3)
+and silently floors it at one; clamping here rather than honouring the request keeps the
+panel from updating four times less often than the file asked for with nothing saying so.
+.I restart
+retries a child that dies mid-session, and does not retry a missing binary or a refused
+ioctl, because it will refuse again just as fast.
+.TP
+.B [alerts]
+\fIenabled\fR = true, \fItemp_c\fR = 90.0, \fIpower_percent\fR = 95.0,
+\fIvram_percent\fR = 92.0, \fIflash_hz\fR = 1.0. Thresholds for temperature, power
+against the cap, and VRAM in use. The thresholds are absolute rather than derived because
+there is no honest way to derive "too hot" from what the card reports: the junction limit
+is a property of the silicon, not something sysfs states. A threshold of 0 disables that
+one check; a missing reading never alerts; every GPU is judged, not only the focused one.
+\fIflash_hz\fR = 0 holds a steady border instead of flashing, which is not the same as
+switching alerting off.
+.TP
+.B [log]
+\fIzstd_level\fR = 3, \fIinterval_s\fR = 0.0. How a
+.B \-\-log
+recording is written. Nothing here turns recording on; only
+.B \-\-log
+does. \fIinterval_s\fR = 0 records every sample, because a recording with gaps in it is a
+recording that lost samples, and choosing to lose them is yours to make.
+.TP
+.B [state]
+Machine-written. It records the choices made while watching rather than the settings
+decided in advance: \fItheme\fR, \fIinterval_ms\fR, \fIprocess_sort\fR,
+\fIprocess_sort_reverse\fR, \fIprocess_filter\fR, \fIshow_idle_processes\fR,
+\fIshow_process_tree\fR, \fIfull_command\fR, \fIoverview\fR, \fIgpu_index\fR. It lives in
+the same file as the configuration, so the next start looks the way the last one was left.
+Editing it by hand works, but deleting the section is the supported way back to the values
+written above: nothing else in the file is ever touched, and the write is atomic, so a
+crash halfway through cannot truncate the configuration.
+.PP
+Precedence, lowest to highest: built-in defaults, the config file, the saved
+.B [state]
+section, the command line. The command line comes last, which is why a one-off
+.B gputop \-i 200
+still wins over what the last session settled on.
+.SH ENVIRONMENT
+.TP
+.B GPUTOP_CONFIG
+Path of the configuration file to use. It is searched first, so it overrides both files in
+the home directory; naming a nonexistent path is a warning, not an error.
+.TP
+.B GPUTOP_STATE
+Path of the file the
+.B [state]
+section is read from and written to. It exists so that a test, a container or a second
+profile can keep its state separate instead of quietly inheriting whatever the last session
+chose.
+.PP
+These two are the whole list. Colour is not taken from
+.BR $TERM ,
+.BR $COLORTERM
+or
+.BR $NO_COLOR :
+.B \-\-no\-color
+and
+.B ui.no_color
+decide that, so a redirect produces the same output regardless of the environment.
+.SH EXIT STATUS
+.TP
+.B 0
+The requested work finished. On
+.BR \-\-dump ,
+.B \-\-devices
+and
+.BR \-\-check ,
+this also means at least one
+.B amdgpu
+card was found.
+.TP
+.B 3
+No AMD GPU was found
+.RB ( EXIT_NO_DEVICE ).
+Only the three one-shot modes distinguish this from success, so a script can tell "no
+hardware" from "gputop is broken". The interface exits 0 in this case as well: it can still
+show a card that another program is holding open, and a window with an error on it is more
+useful than a terminal that vanished.
+.TP
+.B 2
+The command line could not be parsed, by the argument parser's own convention.
+.SH EXAMPLES
+Watch the machine, with the interface deciding where its colours go:
+.EX
+gputop
+.EE
+Watch at half the default rate, one GPU at a time, no idle clients:
+.EX
+gputop \-i 0.5 \-\-no\-blocks
+.EE
+List the cards and print the PCI address of each, to paste into
+.B [gpu.names]:
+.EX
+gputop \-\-devices \-\-pretty
+.EE
+Pipe one sample into
+.BR jq (1):
+.EX
+gputop \-\-dump | jq '.devices[].temperatures'
+.EE
+Record a session as compressed CSV, then watch:
+.EX
+gputop \-\-log ~/session.csv.zst
+.EE
+Log one snapshot a minute from cron, with the process scan left out:
+.EX
+gputop \-\-dump \-\-no\-processes \-\-pretty > /var/tmp/gpu-$(date +%s).json
+.EE
+Find out which sensor or counter a panel's
+.B N/A
+is waiting on, as text or as JSON to keep with the bug report:
+.EX
+gputop \-\-check
+gputop \-\-check \-\-json > gpu-support.json
+.EE
+Install the command:
+.EX
+pipx install gputop
+uv tool install gputop
+.EE
+On Arch, from the PKGBUILD that ships in the source tree under
+.IR packaging/arch :
+.EX
+cd packaging/arch && makepkg \-si
+.EE
+.SH SEE ALSO
+.BR radeontop (1),
+the program whose dump output feeds the optional per-block panel
+.PP
+.BR top (1),
+.BR htop (1),
+.BR sensors (1),
+.BR dmesg (1)
+.PP
+The
+.I amdgpu
+kernel driver's documentation, for what each of the files under
+.I /sys/class/drm/card*/device/
+actually means

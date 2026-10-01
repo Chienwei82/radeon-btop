@@ -4,8 +4,6 @@ Keeping every "how is a number shown" decision in one place is what makes the ``
 policy enforceable: a missing reading must never render as ``0``.
 """
 
-from gputop.model.metrics import AmdgpuMetrics, MemoryPool, Temperature
-
 NA = "N/A"
 
 
@@ -29,8 +27,10 @@ def fmt_temp(value: float | None) -> str:
 def fmt_duration(seconds: float | None) -> str:
     """Format an elapsed duration compactly, e.g. ``1h 02m`` or ``9s``.
 
-    The day field is omitted: this renders a monitor's uptime, and an uptime measured in
-    days is not useful at a glance next to everything else on the line.
+    Days are shown once there are any.  The docstring used to say they were omitted -- on
+    the grounds that an uptime in days is not useful at a glance -- while the code below
+    the comment had been printing ``3d 07h`` all along, and a reader trusting the comment
+    would have deleted the branch that was doing the useful thing.
     """
     if seconds is None:
         return NA
@@ -53,23 +53,19 @@ def fmt_bytes(value: int | None) -> str:
         return NA
     size = float(value)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        # The last unit is the escape hatch rather than an extra case after the loop: a
+        # petabyte-scale value must still land somewhere instead of falling out of the
+        # bottom, and the test after the loop existed to catch that without doing it.
         if abs(size) < 1024.0 or unit == "TiB":
             precision = 0 if unit == "B" else 1
             return f"{size:,.{precision}f} {unit}"
         size /= 1024.0
-    return f"{size:,.1f} TiB"
+    raise AssertionError("unreachable: the loop returns on its final unit")  # pragma: no cover
 
 
 def fmt_percent(value: float | None, digits: int = 0) -> str:
     """Format a 0-100 percentage."""
     return NA if value is None else f"{value:,.{digits}f}%"
-
-
-def fmt_pool(pool: MemoryPool) -> str:
-    """Format a memory pool as ``used / total (percent)``."""
-    percent = pool.percent
-    suffix = f" ({percent:.0f}%)" if percent is not None else ""
-    return f"{fmt_bytes(pool.used)} / {fmt_bytes(pool.total)}{suffix}"
 
 
 def bar(fraction: float | None, width: int = 20, filled: str = "█", empty: str = "░") -> str:
@@ -89,25 +85,3 @@ def bar(fraction: float | None, width: int = 20, filled: str = "█", empty: str
     clamped = min(100.0, max(0.0, fraction))
     count = round(clamped / 100.0 * width)
     return filled * count + empty * (width - count)
-
-
-def throttle_text(metrics: AmdgpuMetrics) -> str:
-    """Describe throttle state, naming the active reasons."""
-    throttle = metrics.throttle
-    if throttle is None:
-        return NA
-    if not throttle.is_throttling:
-        return "none"
-    return ", ".join(sorted(throttle.active))
-
-
-def temperatures_text(metrics: AmdgpuMetrics) -> str:
-    """Render every sensor on one line, e.g. ``edge 49°C  junction 56°C``."""
-    if not metrics.temperatures:
-        return NA
-    return "  ".join(f"{t.label} {fmt_temp(t.celsius)}" for t in _ordered(metrics.temperatures))
-
-
-def _ordered(temps: tuple[Temperature, ...]) -> tuple[Temperature, ...]:
-    """Keep the sampler's ordering; present as a seam for a future preference."""
-    return temps

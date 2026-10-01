@@ -11,12 +11,38 @@ from pathlib import Path
 
 _WHITESPACE = " \t\r\n\x0b\x0c"
 
+#: Bytes read from a sysfs attribute that is a single value.  Anything larger is a table
+#: and passes an explicit limit of its own; see :func:`read_text`.
+VALUE_LIMIT = 4096
 
-def read_text(path: Path) -> str | None:
-    """Read a small text file, returning ``None`` if it cannot be read."""
+#: Bytes read from a sysfs attribute that is a multi-row table.  Generous, because the
+#: cost is one read of a file the page cache already holds, and the alternative is worse
+#: than a slow read: a truncated table still parses, so its parsers answer from the rows
+#: that survived rather than reporting the file as unreadable -- and a table of power
+#: profiles cut before its starred row answers "the first profile is active".
+TABLE_LIMIT = 65_536
+
+#: One row of ``pp_power_profile_mode``: ``<id> <NAME>``, where a trailing ``*`` marks the
+#: active profile and a trailing ``:`` is decoration the driver emits inconsistently.
+#:
+#: The name may contain spaces -- the kernel has shipped ``radeon low`` as well as
+#: ``radeon_low`` -- and it starts with a word character, which is what keeps the table's
+#: own header and detail rows (``0(  GFXCLK)  0  5 ...``) from being read as profiles.
+PROFILE_ROW = re.compile(r"^\s*(\d+)\s+([A-Za-z0-9_][A-Za-z0-9_ -]*?)\s*(\*)?:?\s*$")
+
+
+def read_text(path: Path, *, limit: int = VALUE_LIMIT) -> str | None:
+    """Read a small text file, returning ``None`` if it cannot be read.
+
+    Args:
+        path: The file to read.
+        limit: Bytes to read.  The default suits a single-value attribute; a parser for a
+            multi-row table should pass :data:`TABLE_LIMIT`, because a truncated table
+            does not fail loudly -- it answers from whatever rows fitted.
+    """
     try:
         with path.open("rb") as handle:
-            return handle.read(4096).decode("utf-8", errors="replace").strip()
+            return handle.read(limit).decode("utf-8", errors="replace").strip()
     except OSError, ValueError:
         return None
 
@@ -88,13 +114,6 @@ def resolve(path: Path) -> Path | None:
         return path.resolve(strict=False)
     except OSError, RuntimeError:
         return None
-
-
-def strip_padding(text: str | None) -> str | None:
-    """Strip surrounding whitespace from an optional string."""
-    if text is None:
-        return None
-    return text.strip(_WHITESPACE)
 
 
 def parse_power_microwatts(text: str | None) -> float | None:

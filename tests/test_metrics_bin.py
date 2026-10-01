@@ -34,6 +34,71 @@ def test_v1_3_calcsize_matches_declared_structure_size() -> None:
     assert V1_3.body.size == V1_3_STRUCTURE_SIZE
 
 
+#: ``sizeof(struct gpu_metrics_vX_Y)`` from ``kgd_pp_interface.h``, established with
+#: ``offsetof`` against the installed amdgpu headers.  The computed struct has to land on
+#: the driver's own number, gaps and trailing padding included.
+KERNEL_SIZEOF: dict[tuple[int, int], int] = {
+    (1, 0): 80,
+    (1, 1): 96,
+    (1, 2): 104,
+    (1, 3): 120,
+    (2, 0): 120,
+    (2, 1): 120,
+    (2, 2): 128,
+}
+
+
+@pytest.mark.parametrize("revision", sorted(KERNEL_SIZEOF))
+def test_every_abi_matches_the_kernel_struct_size(revision: tuple[int, int]) -> None:
+    """A layout that does not add up to ``sizeof`` is decoding a card into nonsense.
+
+    This is the check that would have caught the v2.x registry modelling five kernel
+    *arrays* as single scalars: the body came out 44 bytes short, so ``average_gfxclk``
+    was read as ``throttle_status`` and an idle APU was reported as power-throttling.
+    Nothing in the suite could see it, because the only fixture that reached those fields
+    was built from the same wrong layout.
+    """
+    assert ABI_REGISTRY[revision].body.size == KERNEL_SIZEOF[revision]
+
+
+#: Offsets read off ``struct gpu_metrics_v2_1`` in the kernel header.  This is the APU
+#: layout, so it is the one with arrays in it, and the one that regressed.
+V2_1_KERNEL_OFFSETS: dict[str, int] = {
+    # common_header is 4 bytes; then two u16, then temperature_core[8] and l3[2].
+    "temperature_gfx": 4,
+    "temperature_soc": 6,
+    "temperature_core": 8,  # uint16_t[8] -> 16 bytes, so l3 lands at 24 not 10
+    "temperature_l3": 24,
+    "average_gfx_activity": 28,
+    "average_mm_activity": 30,
+    "system_clock_counter": 32,  # uint64_t, aligned to 8
+    "average_socket_power": 40,
+    "average_core_power": 48,  # uint16_t[8]
+    "average_gfxclk_frequency": 64,
+    "current_gfxclk": 76,
+    "current_coreclk": 88,  # uint16_t[8]
+    "current_l3clk": 104,  # uint16_t[2]
+    "throttle_status": 108,  # uint32_t
+    "fan_pwm": 112,
+}
+
+
+@pytest.mark.parametrize("name", sorted(V2_1_KERNEL_OFFSETS))
+def test_the_apu_layout_lands_on_the_kernel_offsets(name: str) -> None:
+    assert ABI_REGISTRY[(2, 1)].field_map[name] == V2_1_KERNEL_OFFSETS[name]
+
+
+def test_the_throttle_flag_is_not_another_field_masquerading() -> None:
+    """The specific damage: ``average_gfxclk_frequency`` used to be read as the flags.
+
+    An unthrottled APU was reported as power- and socket-throttling while its real
+    graphics clock read as 14 MHz, and because ``parse`` returned successfully those
+    wrong numbers *won* over the correct sysfs readers.
+    """
+    abi = ABI_REGISTRY[(2, 1)]
+    assert abi.field_map["throttle_status"] != abi.field_map["average_gfxclk_frequency"]
+
+
 @pytest.mark.parametrize("revision", sorted(ABI_REGISTRY))
 def test_every_abi_calcsize_is_self_consistent(revision: tuple[int, int]) -> None:
     """Each registered layout must place every field inside its own declared size."""

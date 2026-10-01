@@ -4,10 +4,12 @@ Every field is optional.  ``None`` means "not available on this hardware / kerne
 permission level" and must be rendered as ``N/A`` by the UI -- never as ``0``.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from gputop.model.aliases import Bytes, Celsius, Mhz, Nanoseconds, Percent, Rpm, Watts
+from gputop.model.blocks import GpuBlocks
 from gputop.model.device import AmdgpuDevice
+from gputop.model.power import OdcVoltage, PowerProfileTable
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,3 +149,11 @@ class AmdgpuMetrics:
     pcie: PcieLink | None = None
     metrics_abi: str | None = None
     unavailable: frozenset[str] = frozenset()
+    #: Per-block utilisation, or ``None`` when radeontop is not producing it.  ``None`` is
+    #: the common case and is not an error; see :mod:`gputop.readers.radeontop`.
+    blocks: GpuBlocks | None = None
+    #: The overdrive table, read-only.  Absent on hardware the driver does not publish it for.
+    odc: OdcVoltage = field(default_factory=OdcVoltage)
+    #: Every selectable SCPP power profile, read-only.  ``power_profile`` above is the
+    #: active name; this is the whole table it was chosen from.
+    profiles: PowerProfileTable = field(default_factory=PowerProfileTable)

@@ -9,6 +9,7 @@ from gputop.readers.dpm import (
     parse_power_profile,
     read_clock,
     read_clock_max,
+    read_clock_pair,
     read_link,
     read_performance_level,
 )
@@ -226,6 +227,20 @@ class TestDpm:
         """A single-state APU table has no marker; the only row is the current one."""
         assert parse_dpm_table("0: 400Mhz \n") == (400, 400)
 
+    def test_an_unmarked_multi_row_table_reads_the_lowest_state(self) -> None:
+        """The first row is the idle state, and reporting the ceiling reads as 100%.
+
+        The documented fallback is the flagged row, else the first.  Taking the highest
+        row instead made an idling APU -- the exact card that publishes no marker --
+        report its maximum clock, and its clock bar as saturated.
+        """
+        table = "0: 300Mhz\n1: 1200Mhz\n2: 2400Mhz\n"
+        assert parse_dpm_table(table) == (300, 2400)
+
+    def test_an_unrecognised_unit_does_not_empty_the_table(self) -> None:
+        """A unit outside the set used to unmatched silently, losing every row."""
+        assert parse_dpm_table("0: 300000Khz *\n1: 2400000Khz\n") == (300000, 2400000)
+
     def test_empty_table(self) -> None:
         assert parse_dpm_table("") == (None, None)
         assert parse_dpm_table(None) == (None, None)
@@ -238,6 +253,17 @@ class TestDpm:
         write(tmp_path / "pp_dpm_sclk", "0: 500Mhz\n1: 2400Mhz *\n")
         assert read_clock(tmp_path, "current_sclk", "pp_dpm_sclk") == (2200, 2)
 
+    def test_the_ceiling_falls_back_to_the_table(self, tmp_path: Path) -> None:
+        """``current_sclk`` present but ``current_sclk_max`` absent is a real combination.
+
+        Returning ``None`` there contradicted the documented "None only when nothing at
+        all was readable", and left the clock bar with no ceiling to draw against -- the
+        table still carries one, and it costs one read.
+        """
+        write(tmp_path / "current_sclk", "2200\n")
+        write(tmp_path / "pp_dpm_sclk", "0: 500Mhz\n1: 2400Mhz\n")
+        assert read_clock_pair(tmp_path, "current_sclk", "pp_dpm_sclk") == (2200, 2400, 2)
+
     def test_clock_falls_back_to_the_dpm_table(self, tmp_path: Path) -> None:
         """``current_sclk`` is absent on recent drivers, so the table must cover it."""
         write(tmp_path / "pp_dpm_sclk", "0: 500Mhz *\n1: 2400Mhz \n")
@@ -245,6 +271,22 @@ class TestDpm:
 
     def test_clock_absent_everywhere(self, tmp_path: Path) -> None:
         assert read_clock(tmp_path, "current_sclk", "pp_dpm_sclk") == (None, 0)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            " 0 radeon low\n 1 radeon mid *\n",
+            " 0 BOOTUP_DEFAULT\n 1 radeon mid *\n 2 COMPUTE\n",
+        ],
+    )
+    def test_a_profile_name_may_contain_spaces(self, text: str) -> None:
+        """The kernel has shipped both ``radeon low`` and ``radeon_low``.
+
+        A pattern that accepted only word characters dropped the whole row, so a table
+        whose *active* profile was the multi-word one answered with the first profile
+        instead -- a confidently wrong reading of "which profile is active".
+        """
+        assert parse_power_profile(text) == "radeon mid"
 
     def test_clock_max_from_the_table(self, tmp_path: Path) -> None:
         write(tmp_path / "pp_dpm_sclk", "0: 500Mhz *\n1: 2400Mhz \n")

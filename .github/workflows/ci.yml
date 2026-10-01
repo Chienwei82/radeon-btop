@@ -1,0 +1,211 @@
+# Continuous integration for gputop.
+#
+# Everything runs through uv: one lock file resolves the same versions on every runner,
+# and `uv python install` provides the interpreters, so no job depends on what a runner
+# happens to have preinstalled.
+#
+# The free-threaded job is deliberately non-blocking.  gputop's own design targets it --
+# the sampler thread and the interface share no mutable state precisely so the GIL can go
+# -- and its suite passes on 3.14t.  But Textual and Rich ship pure-Python wheels with no
+# free-threaded CI of their own, so a failure there is more likely to be upstream than
+# here, and it should not block a merge until one of them says otherwise.  It is left in
+# the list because "we believe it works" and "we checked this morning" are different
+# claims, and only one of them stays true.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_CACHE_DEPENDENCY_GLOB: "uv.lock"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - run: uv sync --all-groups --locked
+
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+
+      - name: ruff format
+        run: uv run ruff format --check --diff .
+
+  types:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - run: uv sync --all-groups --locked
+
+      # --strict is already set in pyproject.toml; this asserts it stays set rather than
+      # quietly relaxing if someone edits the config.
+      - name: assert strict mode
+        run: |
+          uv run python - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as handle:
+              config = tomllib.load(handle)
+          assert config["tool"]["mypy"].get("strict") is True, "mypy must stay --strict"
+          PY
+
+      - run: uv run mypy
+
+  test:
+    name: pytest (${{ matrix.os }}, python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+
+      - run: uv sync --all-groups --locked
+
+      # The suite drives the real interface headlessly, so it is the slowest job here and
+      # the only one that would notice a regression in the layout rather than in a reader.
+      - name: pytest
+        run: uv run pytest -q
+
+      - name: smoke test --check
+        run: |
+          mkdir -p "${RUNNER_TEMP}/no-gpu"
+          set +e
+          uv run python -m gputop --check --drm-root "${RUNNER_TEMP}/no-gpu"
+          status=$?
+          set -e
+          if [ "$status" -ne 3 ]; then
+            echo "expected exit 3 for a machine with no amdgpu device, got $status"
+            exit 1
+          fi
+
+      - name: smoke test --dump
+        run: |
+          set +e
+          uv run python -m gputop --dump --drm-root "${RUNNER_TEMP}/no-gpu"
+          status=$?
+          set -e
+          if [ "$status" -ne 3 ]; then
+            echo "expected exit 3 for a machine with no amdgpu device, got $status"
+            exit 1
+          fi
+
+  freethreaded:
+    name: pytest (3.14t, free-threaded)
+    runs-on: ubuntu-latest
+    # See the header: Textual and Rich are untested on free-threaded builds upstream.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14t"
+          enable-cache: true
+
+      - run: uv sync --all-groups --locked
+
+      - name: assert the GIL is really off
+        run: |
+          uv run python - <<'PY'
+          import sys
+          assert not sys._is_gil_enabled(), "this is not a free-threaded build"
+          print(sys.version)
+          PY
+
+      - run: uv run pytest -q
+
+  package:
+    name: wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - run: uv sync --all-groups --locked
+
+      - run: uv build
+
+      - name: the wheel carries the console script and its dependency pins
+        run: |
+          uv run python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel, = glob.glob("dist/gputop-*.whl")
+          with zipfile.ZipFile(wheel) as archive:
+              names = archive.namelist()
+              assert "gputop/__main__.py" in names
+              assert "gputop/check.py" in names
+              entry_points = archive.read(
+                  "gputop-0.1.0.dist-info/entry_points.txt"
+              ).decode()
+              assert "gputop = gputop.__main__:main" in entry_points, entry_points
+              metadata = archive.read("gputop-0.1.0.dist-info/METADATA").decode()
+              assert "Requires-Python: >=3.14" in metadata
+          print(wheel)
+          PY
+
+      - name: install the wheel and run the installed command
+        run: |
+          uv tool install --force dist/gputop-*.whl
+          gputop --version
+          gputop --help
+
+      - name: the wheel does not ship the tools or the tests
+        run: |
+          uv run python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel, = glob.glob("dist/gputop-*.whl")
+          with zipfile.ZipFile(wheel) as archive:
+              offenders = [
+                  name
+                  for name in archive.namelist()
+                  if name.startswith(("tests/", "tools/")) or "__pycache__" in name
+              ]
+          assert not offenders, offenders
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gputop-wheel
+          path: dist/*.whl
+          if-no-files-found: error

@@ -69,7 +69,10 @@ All kernel-interface claims in this document were verified on live hardware (Nav
 
 ### 1.2 Threading model
 
-There are exactly **two** execution contexts and **zero** shared mutable objects.
+There are exactly **two** execution contexts on the snapshot path — the UI's event loop and the
+sampler thread — and **zero** shared mutable objects *between them*. The optional radeontop
+supervision described below adds per-child drain threads and the project's only lock; both are
+confined to that one feature and neither participates in the snapshot handoff.
 
 | Context | Owns | Touches |
 |---------|------|---------|
@@ -84,10 +87,43 @@ The **only** channel between them is a `queue.SimpleQueue[GpuSnapshot]`. A snaps
 ones are discarded. The sampler never blocks and never builds a backlog, so a slow UI degrades into
 staleness rather than memory growth or latency.
 
+**The optional per-block panel adds two threads per GPU, and one lock.** The radeontop supervision
+in §7.5 is the only thing in the program that owns a subprocess handle, and a subprocess handle is
+not an immutable value that can be passed through a queue. Each child gets:
+
+| Thread | Started by | Drains | Publishes |
+|--------|-----------|--------|-----------|
+| `gputop-radeontop-out` | `RadeontopSource.start()` | the child's **stdout** | `GpuBlocks`, by rebinding one attribute to a frozen value |
+| `gputop-radeontop-err` | `RadeontopSource.start()` | the child's **stderr** | a bounded deque of the last 20 lines, for classifying a failure |
+
+Both drains are required, not belt-and-braces: an undrained pipe fills, the child blocks on its
+own write, and its sampling freezes *silently* — the worst failure mode available, because every
+observable still looks healthy. Neither thread is ever joined while the child is alive; joining is
+a shutdown step, bounded by a timeout, so a child that dies holding its stderr pipe open cannot
+hang the sampler.
+
+**The one lock in the codebase, and why it is allowed.** `RadeontopSource` guards process creation
+and teardown with a `threading.Lock`. It is the only lock in the project, and the rule above says
+no shared mutable state exists to protect — but that reasoning is about *snapshot* state, and a
+`Popen` handle is not snapshot state. The sampler thread starts and polls the child; the UI thread
+may stop the pool during unmount. Those two genuinely race on creation and teardown, and unlike a
+rebinding of a frozen dataclass there is no ownership argument that makes them safe.
+
+The lock is held only across `Popen` and `terminate`/`wait` — a handful of syscalls per session
+and per restart — and **never while reading a sample**. The values the hot path reads (`_status`,
+`_blocks`) are still published by single rebinds of frozen objects, so the property the rest of the
+program depends on is untouched: the lock protects the *handle*, not the *data*. A lock held across
+the object's whole lifetime, or taken on every read, would have bought nothing and reintroduced
+exactly the contention the rest of the design avoids.
+
 **Free-threaded safety (`3.14t`):**
 
-- No `threading.Lock` is required, because there is no shared mutable state to protect.
+- No `threading.Lock` is required on the snapshot path, because there is no shared mutable state
+  to protect. The one lock that exists is confined to the radeontop child's lifecycle and is held
+  for a bounded number of syscalls.
 - The sampler thread's delta state is *thread-confined*, not shared — the UI never reads it.
+- The radeontop drain threads publish by rebinding frozen objects, the same rule
+  `sampler/engine.py` follows for its history, so they need no lock of their own either.
 - No C extension beyond Textual's own dependency tree is assumed to be `3.14t`-clean in v1; the CI
   matrix runs the full suite on `3.14t` and a subset is marked `xfail(strict=False)` if a
   dependency proves non-free-threaded. gputop's own modules must pass fully.
@@ -146,8 +182,9 @@ radeon-btop/
 ├── gputop/
 │   ├── __init__.py             # __version__, no heavy imports
 │   ├── __main__.py             # python -m gputop
-│   ├── cli.py                  # argparse surface, --dump, --config, --once, --version
+│   ├── cli.py                  # argparse surface, --dump, --config, --once, --blocks, --log, --version
 │   ├── config.py               # frozen Config dataclasses + tomllib loader + validation
+│   ├── sessionlog.py           # --log: CSV / JSON Lines writer, zstd by suffix (same level as config.py)
 │   ├── errors.py               # GpuTopError hierarchy (rarely raised; reads never raise)
 │   ├── logsetup.py             # logging; optional compression.zstd ring handler
 │   ├── model/                  # ── pure data, no I/O ──
@@ -155,6 +192,9 @@ radeon-btop/
 │   │   ├── aliases.py          # type aliases: Mhz, Bytes, Celsius, Watts, Percent, Bdf…
 │   │   ├── device.py           # AmdgpuDevice, DeviceKind
 │   │   ├── metrics.py          # AmdgpuMetrics + Clock/MemoryPool/Power/Fan/ThrottleInfo/…
+│   │   ├── blocks.py           # GpuBlocks, BlockReading, ClockReading, BlocksStatus, block order
+│   │   ├── power.py            # PowerProfileTable, OdcVoltage, OdvDomain, OdvUnit (§7.4)
+│   │   ├── alerts.py           # Thresholds, AlertState, AlertBreach, evaluate/worst (§10)
 │   │   ├── process.py          # GpuProcess, EngineUsage, ProcessScanResult
 │   │   ├── snapshot.py         # GpuSnapshot, SourceReport, SamplerStats
 │   │   └── history.py          # fixed-size RingBuffer[T] for graphs
@@ -164,6 +204,8 @@ radeon-btop/
 │   │   ├── discovery.py        # enumerate /sys/class/drm/card* bound to amdgpu
 │   │   ├── hwmon.py            # hwmon device resolution + label-aware temperature mapping
 │   │   ├── dpm.py              # pp_dpm_* parsing, current_sclk/mclk, pp_power_profile_mode
+│   │   ├── pp.py               # pp_power_profile_mode + pp_od_clk_voltage, **read-only**
+│   │   ├── radeontop.py        # radeontop subprocess supervision + dump parsing (§7.5)
 │   │   ├── throttle.py         # ThrottleStatus IntFlag + human labels
 │   │   ├── metrics_bin.py      # gpu_metrics ABI registry + struct parsing (§6)
 │   │   ├── procfs.py           # /proc/<pid>/fdinfo scanning, client dedup, engine deltas
@@ -198,6 +240,10 @@ radeon-btop/
     ├── test_hwmon.py
     ├── test_dpm.py
     ├── test_throttle.py
+    ├── test_power_tables.py     # pp_* parsing in both eras + the module's read-only proof
+    ├── test_radeontop.py        # dump parsing by field name, argv, degradation states
+    ├── test_alerts.py           # thresholds, hottest-sensor rule, no-latch, all-devices
+    ├── test_sessionlog.py       # suffix rules, append/header seeding, empty cells, zstd
     ├── test_metrics_bin_v1.py
     ├── test_metrics_bin_v2.py
     ├── test_metrics_bin_edge.py
@@ -206,6 +252,8 @@ radeon-btop/
     ├── test_sampler.py
     ├── test_deltas.py
     ├── test_format.py
+    ├── test_ui_blocks_panels.py # blocks/profile panel text, heading, absent-vs-zero
+    ├── test_ui_extra_panels.py  # app-level: hidden panels, alert border, recorder lifetime
     ├── test_no_writes.py       # static: read-only guarantee
     └── test_python_compat.py   # PEP 649: no __future__ imports
 ```
@@ -215,13 +263,20 @@ radeon-btop/
 ```
 cli → ui → sampler → readers → model
               ↘        ↘
-                    config, diagnostics
+                    config, diagnostics, sessionlog
 ```
 
 - `model/` imports **nothing** from the package except `aliases`. No I/O, no Textual, no logging.
-- `ui/` performs **no** I/O. It renders whatever `GpuSnapshot` it is handed.
+- `ui/` performs **no** I/O **against the system**: it opens no sysfs path, starts no process and
+  reads no `/proc` entry. It renders whatever `GpuSnapshot` it is handed.
 - `readers/` never imports `ui` or `sampler`.
 - `config.py` is importable from anywhere.
+- `sessionlog.py` is importable from anywhere, and is used by both `cli` and `ui`, for the same
+  reason `config.py` is: it is neither a snapshot-layer reader nor a presentation concern. It sits
+  at the **same level as `config.py`** — shared by callers on both sides of the diagram rather than
+  below either of them. It is opened by the app because `--log` is a property of the whole session,
+  not of a sample, so the object that owns the session's lifetime owns the file. This is the one
+  place `ui/` writes anything, and it writes only where the user named (§7.5).
 
 This is what makes the TUI testable without a GPU and the readers testable without a terminal.
 
@@ -741,6 +796,122 @@ vanishing.
 The scanner therefore enumerates what it can see and reports both counts so the UI can be honest
 about the truncation (SPEC §7, §4.6).
 
+### 7.4 Read-only SCPP and overdrive attributes
+
+Both of these are **writable** sysfs files whose contents reprogram hardware. They are read and
+never written, which is a structural property of `readers/pp.py` rather than a convention: the
+module exposes no function accepting a mode or a writable handle, a test scans the module's own
+source for `write_text`, `write_bytes`, `open("w")`, `os.open` and `truncate`, and a second test
+reads a table and asserts the file is byte-identical afterwards — a reader that accidentally
+opened for writing would truncate its own input.
+
+| Attribute | Contents | Read as | Notes |
+|-----------|----------|---------|-------|
+| `pp_power_profile_mode` | `<id> <NAME>` rows, `*` marks the active profile | The **whole** table, plus the active entry | The per-profile detail rows (`0(  GFXCLK)  0  5  1 …`) are skipped without a special case: they open with a digit immediately followed by `(`, which no profile row has, so one expression separates the two |
+| `pp_od_clk_voltage` | Either a legacy voltage table or a sectioned overdrive **clock** table | Per-domain overdrive ceilings plus the `OD_RANGE` floor/ceiling and the `OD_VDDGFX_OFFSET` | See below |
+
+**`pp_od_clk_voltage` is two formats behind one filename.** Older parts wrote a voltage table —
+`0:300 1:350 2:400`, bare millivolts, no sections. On RDNA2 and later the driver repurposed the
+same attribute for overdrive *clock* ceilings and added sections:
+
+```
+OD_SCLK:
+0: 500Mhz
+1: 2104Mhz
+OD_MCLK:
+0: 97Mhz
+1: 1000MHz
+OD_RANGE:
+SCLK:     500Mhz       2600Mhz
+MCLK:     674Mhz       1075Mhz
+OD_VDDGFX_OFFSET:
+-50mV
+```
+
+The parser is therefore **section-aware and unit-carrying**: the unit travels with each entry
+instead of being assumed, because presenting a 2104 MHz ceiling as a voltage would be wrong on
+every modern card, and a parser that guessed would be confidently wrong rather than absent. Whether
+a file declares `OD_*` sections decides the default unit for a bare entry; a file with no section
+header at all is read as the single legacy voltage table it is, so cards from both eras decode
+through one entry point. Entries are matched with `finditer`, not `match`, because some kernels
+write one pair per line and others write a whole run of pairs on one line — an anchored match
+would read the first pair and silently discard the rest of the table.
+
+The per-domain bar is a ratio of the driver's own stated `OD_RANGE`, not of a hard-coded maximum,
+so it stays correct on a part whose ceiling is not the one this code was written against.
+
+### 7.5 The two paths that are not sysfs
+
+Per-block utilisation is the one **source** that is not a file, and the session log is the only
+**destination** that is not a config file or the terminal.
+
+**Source — a supervised `radeontop` child.** The amdgpu driver exposes GRBM and SRBM busy only
+through the radeon ioctl on a privileged handle, which is exactly the dependency this program's
+unprivileged design refuses to take on globally. The counters are therefore read the one way that
+leaves *gputop* unprivileged: by supervising `radeontop` and parsing its dump output.
+
+```
+radeontop -d - -i <interval> -l 0 -t <ticks> [-p /dev/dri/cardN | -b <bus>]
+```
+
+| Flag | Why |
+|------|-----|
+| `-d -` | dump to stdout, so the output is a stream to consume rather than a file to re-read |
+| `-i <interval>` | seconds between dumps. **Whole seconds only**: radeontop parses it with `atoi` and floors it at 1, so `RadeontopOptions.validated()` clamps to the same floor rather than silently sampling slower than the user asked for |
+| `-l 0` | radeontop's spelling of "until terminated" |
+| `-t <ticks>` | samples per second the child computes internally. The default of 120 costs CPU and buys accuracy nobody can see on a bar that repaints once a second |
+| `-p <node>` | the DRM node, **preferred** — a PCI bus alone is ambiguous on a machine with two cards behind one bridge, and the wrong card's numbers are worse than no numbers |
+| `-b <bus>` | the two-digit hexadecimal bus from the BDF, used only when no node path exists |
+
+One child per GPU. The dump line is parsed **by field name, never by position** — `dump.c` emits
+`tc`, `smx`, `cr`, `uvd`, `vce0`, `vram`, `gtt` and the clocks only when the card reports those
+bits, so a positional parser reads `vgt`'s value as `ta`'s on every modern card and reports
+confidently wrong numbers. Naming the fields makes a missing block a missing block. Block *keys*
+travel with every reading (they are what the JSON dump and the CSV header use); the *labels* are
+radeontop's own display names, abbreviated only enough to fit the panel's label column.
+
+**Degradation is five states, not one.** A missing binary, a card the driver cannot read, a
+refused ioctl and a crash are four different problems with four different remedies, so they are
+four values of `BlocksStatus` plus `DISABLED`. The panel is hidden and the reason is carried on
+the snapshot (`blocks_hint`) — as a hint rather than a warning, because it is a permanent
+condition that would otherwise occupy a warning slot for the whole session and push out a real
+error that happened once.
+
+Failure classification reads **stderr**, and the stderr drain is joined *before* classifying. That
+ordering is load-bearing rather than tidy: radeontop reports every problem it has, most usefully
+last — "Failed to find DRM devices", then "Failed to open DRM node", then "Cannot access GPU
+registers, are you root?". stdout closes as soon as the child dies while stderr is still being
+delivered, so classifying on stdout EOF alone reads a partial buffer and reports the least
+actionable of the three, telling a user their card is unsupported when the real answer is that
+they need privileges radeontop wants.
+
+A child that dies mid-session (a driver reload, a hot-unplugged eGPU) is restarted a bounded
+number of times. `MISSING`, `UNSUPPORTED` and `NOT_PERMITTED` are never retried: they will fail
+again just as promptly, and retrying would be a busy loop. The child's pipes are closed
+explicitly rather than left to the garbage collector — a session that starts and stops the pool
+repeatedly leaks two descriptors each time and eventually runs out of them.
+
+**Destination — the session log.** `--log PATH` is the only way gputop writes anything derived from
+the samples; the one other thing it writes is the `[state]` section of its own config file
+(SPEC §9).
+The format comes from the filename — `.csv`, or `.json`/`.jsonl`/`.ndjson` — with an optional
+trailing `.zst`/`.zstd` meaning zstd through the standard library's `compression.zstd`. The base
+name chooses the format and the suffix chooses the transport, so the two are independent and
+neither is declared twice: `session.csv.zst` is a compressed CSV.
+
+| Decision | The obvious alternative | What the alternative costs |
+|----------|-------------------------|---------------------------|
+| JSON **Lines**: one object per line, per device | a single JSON array | an interrupted session loses everything; a truncated array is not readable at all |
+| append mode, header seeded from whether the file already had content | truncate on open | recording twice to one path writes a second header into the middle of the data, where a strict CSV reader absorbs it as a record |
+| an absent reading is an **empty cell** | `0`, or `N/A` | `0` is a lie; `N/A` in a numeric column is a parse error every consumer must special-case |
+| first failure wins, then silence | warn per record | a full disk buries the status line at one warning per sample |
+| flush per record, close on every exit path | buffer until exit | a `.zst` stream left unclosed is a truncated archive, not a readable file |
+
+The block columns are present whether or not `radeontop` is running. A stable column set is the
+entire point of a CSV header: a consumer must be able to read row 4000 with the code that read
+row 1, including on a session where `radeontop` was installed halfway through. A card with no
+Texture Cache unit leaves that cell empty rather than shifting every later column.
+
 ---
 
 ## 8. Process-scan algorithm
@@ -793,6 +964,10 @@ Tick loop:
 4. Scan `/proc` → dedup → compute engine deltas against this thread's previous counters.
 5. Build `GpuSnapshot`, `queue.put_nowait(snapshot)`.
 6. `stop.wait(timeout=interval_s)` — interruptible sleep, so quitting is immediate.
+
+When the per-block panel is enabled the tick also calls `RadeontopPool.poll()`: a liveness check and
+a bounded restart per child, with no I/O of its own — the drain threads own the pipes. The pool's
+status and hint ride along on the snapshot, so the UI never has to ask the subprocess anything.
 
 Behavioural guarantees:
 
@@ -856,6 +1031,28 @@ Target: 100×34 minimum, 120×40 comfortable. Shown for a **discrete** RDNA2 GPU
 │  └─────────────────────────────────────────────────────────────┘   │
 ```
 
+**With `--blocks`**, an extra row carries the two optional panels side by side, each using the
+wider label column the block names need so the pair shares one left edge:
+
+```
+│  ┌ BLOCKS · Texture Addr 99% ─────────────┐  ┌ POWER PROFILE ─────────────────────────────┐  │
+│  │                                        │  │                 profile  BOOTUP_DEFAULT    │  │
+│  │                                        │  │                 index    0 of 7            │  │
+│  │                                        │  │                 available  3D_FULL_SCREEN …│  │
+│  │ Graphics pipe    ▐██████████▌ 82%      │                                                  │
+│  │ Event Engine     ▐██▌ 24%              │                                                  │
+│  │ Vertex Grouper   ▐▌ 9%                 │                                                  │
+│  │ Texture Addr     ▐█████████████ 99%    │  │ OD Shader clock  ▐█████████▌ 2104/2600     │  │
+│  │ Texture Cache    ▐█████████████ 98%    │  │ OD Memory clock  ▐██████████▌ 1000/1075    │  │
+│  │ Shader Export    ▐██▌ 18%              │  │ OD SoC clock     ▐████████▌ 900/1200       │  │
+│  │ Shader Interp    ▐▌ 6%                 │                                                  │
+│  │ Scan Converter   ▐              0%     │  │                 vddgfx      +25 mV         │  │
+│  │ …                                      │  │                 read-only                  │  │
+│  │ UVD              ▐              0%     │                                                  │
+│  │ Memory Clock    ▐████████▌ 840 MHz     │                                                  │
+│  └────────────────────────────────────────┘  └────────────────────────────────────────────┘  │
+```
+
 Wireframe rules:
 
 - The footer always shows the **resolved source** (`gpu_metrics v1.3` vs `sysfs`) — users can
@@ -866,6 +1063,44 @@ Wireframe rules:
   (accessibility, and narrow terminals).
 - At width < 100 the graphs and sensors collapse to a single column; below 70 columns a
   "terminal too narrow" message is shown rather than a mangled layout.
+- **The two optional panels are decided independently**, even though they share one row. The blocks
+  panel needs a privileged child process and the power-profile panel is read from sysfs, so gating
+  the second on the first withheld a table that works everywhere from every unprivileged user.
+  Each is hidden when it has nothing to say; a panel of empty bars with a "waiting" caption is a
+  worse answer than no panel plus a sentence, because it implies the data is coming. When the
+  blocks panel is hidden the reason is in the status line and in the help overlay.
+- **One height threshold gates the row**, measured rather than estimated. The cost is not the row's
+  own height but what it takes from the sensor panel beside it: that panel scrolls, so a row added
+  below the main one pushes its trailing lines (PCIe link, throttle reasons) out of view. The
+  primary readings — clocks, temperatures, power, cap — must survive, and
+  `MIN_HEIGHT_FOR_OPTIONAL_ROW` is the measured height at which they do. A test asserts the
+  invariant at and above the threshold, so raising the row further cannot silently cost the
+  sensors something.
+- The blocks panel's **title** names the busiest block, so "which block" — the question the panel
+  is opened with — is answered before the bars are read. Labels are radeontop's own names,
+  abbreviated (`Texture Addr`, `Shader Interp`) only enough to fit the label column; that column's
+  width is *derived* from the label table rather than hard-coded, so a label whose length no longer
+  matches the column is caught by a test rather than discovered as a wrapped row. The power-profile
+  panel indents its plain text rows to the same column, so both panels' bars start at the same
+  offset.
+- A block at exactly zero still draws an empty bar with a `0%` label: radeontop omits a block the
+  hardware has no unit for, so every row shown describes something that exists.
+- The power-profile panel states `read-only` in its own body. It is a claim the code makes
+  checkable (§7.4), and printing it costs one line of a panel that is usually taller than that.
+  It shares a row with the blocks panel and is shown only when that panel is — one
+  "SCPP is unavailable" row is worth more than two panels that can disagree about it.
+- The **alert border** replaces the accent on every panel at once while a threshold is crossed,
+  alternating between the alert colour and the track colour — the dark phase is the *track* rather
+  than the accent, so the flash reads as "this border went away" rather than as a second thing to
+  look at. One border that changes says "this screen"; three borders with independent phases
+  would say nothing. The colour is written to each panel's own `widget.styles.border` and **not**
+  through a CSS variable: `Stylesheet.set_variables` *replaces* the variable map rather than
+  merging into it, so driving a once-per-second flash through it deletes Textual's own design
+  tokens — including the `$background` its default `App` rule references — and the whole
+  stylesheet then fails to resolve. That was a real failure, found and fixed; it is recorded here
+  because the mistake is invisible until the sheet stops loading.
+- With nothing over a limit the border is the theme accent, and must leave no trace of having been
+  alarmed: the alert state is recomputed from scratch every sample, so it cannot latch.
 
 ---
 
@@ -889,6 +1124,17 @@ Wireframe rules:
 | `d` | Dump a diagnostic snapshot |
 | `h`, `?` | Help overlay |
 | `Esc` | Close the top overlay |
+
+### 11.1 Flags that are deliberately not keys
+
+| Flag | Effect | Why a flag, not a binding |
+|------|--------|-------------------------|
+| `--blocks` / `--no-blocks` | Force the per-block panel on or off, overriding `blocks.enabled` | Starting and stopping a supervised child process from a keystroke would let a stray keypress spawn a process that reaches for the GPU, and would turn a whole-session resource decision into a toggle whose state nobody remembers |
+| `--log PATH` | Record the session to `PATH` | A recording is a property of a session, not a view. A binding would have to open and close a file mid-run, interleaving two encoders into one path and leaving a truncated `.zst` archive behind |
+
+`--blocks` and `--no-blocks` are a mutually exclusive group with `default=None`, so "flag absent"
+is distinguishable from "flag says false": absent leaves `blocks.enabled` alone, which is what
+lets a config file stay authoritative and a flag override it in either direction.
 
 ---
 
@@ -1067,6 +1313,17 @@ Dedup test cases:
 - `test_ui_smoke.py` — Textual `run_test()` pilot: mount with a synthetic snapshot, assert key
   bindings switch GPU, cycle sort, toggle panels, and that no widget raises at any terminal size.
 - `test_config.py` — TOML parsing, precedence, clamping, unknown-key warnings, hot reload.
+- `test_power_tables.py` — `pp_od_clk_voltage` in **both** eras through one entry point, the
+  `OD_RANGE`/`OD_VDDGFX_OFFSET` shapes, bar ratios, and the module's own read-only proof: the
+  no-write-call source scan, plus a read that leaves the fixture byte-identical.
+- `test_radeontop.py` — dump lines from cards that omit `tc`/`smx`/`cr` parse by field name with
+  those blocks *absent* rather than shifted; argv construction for both `-p` and `-b`; the
+  interval clamp; stderr classification ordering (a permission failure must not be reported as
+  "unsupported"); restart bounds.
+- `test_alerts.py` — hottest-sensor-wins, `None` never alerts, a threshold of `0` disables only
+  its own check, and the same condition crossing and clearing leaves no residue.
+- `test_sessionlog.py` — suffix rules including `.zst`, append/header seeding against a
+  pre-existing file, empty cells for absent readings, round-trip through `read_log`.
 - **CI matrix:** `uv run pytest` on CPython 3.14; `uv run --python 3.14t pytest`; `uv run ruff check`;
   a `python3.14 -X importtime` budget check; and `mypy --strict` once type stubs settle.
 
@@ -1107,3 +1364,6 @@ because the data model's shape is only settled once the readers are real.
 | APU `v2.x` layouts verified only from a reference decoder, not live hardware (`UNVERIFIED`) | Possible APU field mis-mapping | Fixtures pin the layout; the `--dump` cross-check makes mismatches reportable |
 | Textual's free-threaded readiness | May block `3.14t` CI | gputop's own modules tested strictly; dependency-specific xfails isolated |
 | Device-name table ages | Cosmetic "unknown device" names | Config override `[gpu.names]` |
+| `radeontop` absent, or present but unprivileged | Per-block panel unavailable on many machines | Off by default (§7.5); five distinct states so the reason is always specific; every other panel is unaffected and gputop itself never gains a privilege |
+| A third format appears in `pp_od_clk_voltage` | Overdrive panel misreads one generation | Unit carried per entry and sections detected by shape, so an unrecognised section degrades to `N/A` rather than to a wrong number |
+| An interrupted session loses its recording | Partial CSV/JSONL file | Append-only, JSON Lines rather than an array, flush per record — the cost of a crash is one row, and an unopenable target degrades to a notice rather than a failed start (§7.5) |

@@ -11,6 +11,7 @@ sensor sparklines; only the height and scaling differ.
 import time
 from collections import deque
 from collections.abc import Iterable, Sequence
+from functools import lru_cache
 from typing import Literal
 
 from rich.style import Style
@@ -41,6 +42,17 @@ DEFAULT_CAPACITY = 300
 ScaleMode = Literal["percent", "auto"]
 
 
+@lru_cache(maxsize=512)
+def _style_for(colour: str) -> Style:
+    """Return a shared :class:`~rich.style.Style` for one colour.
+
+    ``Style`` is immutable, so one instance per colour can be shared by every cell of
+    every graph.  Building one per cell was a measurable share of the frame time: a
+    60x20 panel is 1200 cells, and the ramp has at most 255 distinct colours in it.
+    """
+    return Style(color=colour)
+
+
 def braille_text(
     samples: Sequence[float | None],
     width: int,
@@ -67,6 +79,12 @@ def braille_text(
 
     Returns:
         Styled text exactly ``width`` columns by ``height`` rows.
+
+    Filled cells are accumulated per *dot column* rather than per sample.  A 300-sample
+    history in a 58-cell panel puts roughly five samples in each dot column, and every one
+    of them paints the same run of dots from its own value down to the bottom -- so the
+    drawing only depends on the highest point and the peak value of each column.  Doing
+    the reduction first is the same output for a fraction of the work.
     """
     if width <= 0 or height <= 0:
         return Text("")
@@ -80,8 +98,9 @@ def braille_text(
     dot_width = width * 2
     dot_height = height * 4
 
-    masks = [[0] * width for _ in range(height)]
-    peaks = [[low] * width for _ in range(height)]
+    # Indexed ``[parity][cell_x]``: the two dot columns of a cell are independent.
+    top_of: list[list[int]] = [[dot_height] * width, [dot_height] * width]
+    peak_of: list[list[float]] = [[low] * width, [low] * width]
 
     last = len(samples) - 1
     for index, value in enumerate(samples):
@@ -94,25 +113,40 @@ def braille_text(
         else:
             fraction = (value - low) / span
             top = round((1.0 - min(1.0, max(0.0, fraction))) * (dot_height - 1))
-        for dot_y in range(top, dot_height):
-            cell_y = dot_y >> 2
-            masks[cell_y][cell_x] |= BRAILLE_BITS[dot_y & 3][x & 1]
-            if value > peaks[cell_y][cell_x]:
-                peaks[cell_y][cell_x] = value
+        parity = x & 1
+        if top < top_of[parity][cell_x]:
+            top_of[parity][cell_x] = top
+        if value > peak_of[parity][cell_x]:
+            peak_of[parity][cell_x] = value
 
-    track_style = Style(color=track)
+    masks = [[0] * width for _ in range(height)]
+    peaks = [[low] * width for _ in range(height)]
+    for parity in (0, 1):
+        tops = top_of[parity]
+        column_peaks = peak_of[parity]
+        for cell_x in range(width):
+            top = tops[cell_x]
+            if top >= dot_height:
+                continue
+            value = column_peaks[cell_x]
+            for dot_y in range(top, dot_height):
+                cell_y = dot_y >> 2
+                masks[cell_y][cell_x] |= BRAILLE_BITS[dot_y & 3][parity]
+                if value > peaks[cell_y][cell_x]:
+                    peaks[cell_y][cell_x] = value
+
+    track_style = _style_for(track)
     rows: list[Text] = []
     for cell_y in range(height):
         row = Text(no_wrap=True, overflow="crop", end="")
+        mask_row = masks[cell_y]
+        peak_row = peaks[cell_y]
         for cell_x in range(width):
-            mask = masks[cell_y][cell_x]
+            mask = mask_row[cell_x]
             if mask == 0:
                 row.append(chr(BRAILLE_BASE), track_style)
             else:
-                row.append(
-                    chr(BRAILLE_BASE + mask),
-                    Style(color=gradient.at(peaks[cell_y][cell_x])),
-                )
+                row.append(chr(BRAILLE_BASE + mask), _style_for(gradient.at(peak_row[cell_x])))
         rows.append(row)
     # Joining rows explicitly is what makes this a plot.  Appending every cell in one
     # loop produced a single long strip that the layout then wrapped, which smeared the
@@ -179,7 +213,8 @@ class BrailleGraph(Widget):
         self._theme = theme
         self._gradient = gradient or Gradient(theme)
         self._scale_mode: ScaleMode = scale
-        self._values: deque[float | None] = deque(maxlen=max(1, capacity))
+        self._capacity = max(1, capacity)
+        self._values: deque[float | None] = deque(maxlen=self._capacity)
 
     # -- data ---------------------------------------------------------------
 
@@ -189,10 +224,14 @@ class BrailleGraph(Widget):
         self.refresh()
 
     def set_series(self, values: Iterable[float | None]) -> None:
-        """Replace the whole series, keeping only the most recent samples."""
-        capacity = self._values.maxlen or len(list(values))
+        """Replace the whole series, keeping only the most recent samples.
+
+        ``values`` may be any iterable, including a one-shot generator: it is materialised
+        once, before the tail is taken.
+        """
+        items = list(values)
         self._values.clear()
-        self._values.extend(list(values)[-capacity:])
+        self._values.extend(items[-self._capacity :])
         self.refresh()
 
     def clear(self) -> None:

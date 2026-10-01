@@ -7,6 +7,7 @@ rendering assertion.
 import itertools
 
 import pytest
+from rich.style import Style
 from rich.text import Text
 
 from gputop.ui.theme import (
@@ -363,3 +364,93 @@ class TestCpuMeter:
         meter = CpuMeter()
         meter.percent = 250.0
         assert meter.format() == "250%"
+
+
+class TestRasteriserEquivalence:
+    """The rasteriser draws per *dot column* rather than per sample.
+
+    Folding the samples into each column before painting is what made a 300-sample graph
+    about twice as fast, and it is an optimisation only if the cells come out identical.
+    The reference below is the original per-sample loop, kept here as the oracle: if a
+    future change to either implementation alters the picture, these fail.
+    """
+
+    @staticmethod
+    def _reference(samples: list[float | None], width: int, height: int, **kwargs) -> Text:
+        """The pre-optimisation implementation: fill from each sample down to the floor."""
+        from gputop.ui.widgets import _axis, _placeholder
+
+        gradient = kwargs["gradient"]
+        track = kwargs["track"]
+        if width <= 0 or height <= 0:
+            return Text("")
+        present = [value for value in samples if value is not None]
+        if not present:
+            return _placeholder(width, height, track)
+        low, high = _axis(present, kwargs.get("scale", "percent"))
+        span = high - low
+        dot_width, dot_height = width * 2, height * 4
+        masks = [[0] * width for _ in range(height)]
+        peaks = [[low] * width for _ in range(height)]
+        last = len(samples) - 1
+        for index, value in enumerate(samples):
+            if value is None:
+                continue
+            x = (index * (dot_width - 1)) // last if last else dot_width - 1
+            cell_x = x >> 1
+            if span <= 0:
+                top = dot_height - 1
+            else:
+                top = round((1.0 - min(1.0, max(0.0, (value - low) / span))) * (dot_height - 1))
+            for dot_y in range(top, dot_height):
+                cell_y = dot_y >> 2
+                masks[cell_y][cell_x] |= BRAILLE_BITS[dot_y & 3][x & 1]
+                if value > peaks[cell_y][cell_x]:
+                    peaks[cell_y][cell_x] = value
+        rows = []
+        for cell_y in range(height):
+            row = Text(no_wrap=True, overflow="crop", end="")
+            for cell_x in range(width):
+                mask = masks[cell_y][cell_x]
+                row.append(
+                    chr(BRAILLE_BASE + mask),
+                    Style(color=track if mask == 0 else gradient.at(peaks[cell_y][cell_x])),
+                )
+            rows.append(row)
+        return Text("\n").join(rows)
+
+    @pytest.mark.parametrize("width,height", [(1, 1), (5, 3), (24, 4), (58, 10), (60, 20)])
+    @pytest.mark.parametrize("scale", ["percent", "auto"])
+    def test_same_picture_as_the_per_sample_rasteriser(
+        self, width: int, height: int, scale: str
+    ) -> None:
+        gradient = Gradient(DEFAULT_THEME)
+        kwargs = {"gradient": gradient, "track": DEFAULT_THEME.track, "scale": scale}
+        series = [
+            [float(index % 101) for index in range(300)],
+            [None if index % 17 == 0 else float(index * 3 % 97) for index in range(300)],
+            [50.0] * 120,
+            [0.0, 100.0] * 60,
+            [-20.0, 140.0] * 40,
+            [None] * 30,
+        ]
+        for samples in series:
+            mine = braille_text(samples, width, height, **kwargs)
+            theirs = self._reference(samples, width, height, **kwargs)
+            assert mine.plain == theirs.plain, (len(samples), width, height, scale)
+            assert _spans(mine) == _spans(theirs), (len(samples), width, height, scale)
+
+    def test_a_single_sample_still_renders(self) -> None:
+        """The reduction must not divide by an empty series."""
+        assert render([42.0], 4, 2).plain.strip()
+
+    def test_gaps_stay_empty(self) -> None:
+        """A gap is a hole, not a bridge: an absent sample paints no dot column."""
+        text = render([80.0, None, None, None], 8, 2)
+        rows = text.plain.splitlines()
+        assert all(cell == "⠀" for row in rows for cell in row[2:])
+
+
+def _spans(text: Text) -> list[tuple[int, int, str]]:
+    """Styled spans as comparable tuples, so two renderings can be compared exactly."""
+    return [(span.start, span.end, str(span.style)) for span in text._spans]

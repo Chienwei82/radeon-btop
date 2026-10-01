@@ -1,0 +1,176 @@
+# PKGBUILD for gputop -- a btop-style terminal monitor for AMD Radeon GPUs (amdgpu).
+#
+# This file lives in the gputop source tree, under packaging/arch/, rather than in the AUR.
+# A recipe that ships with the thing it builds cannot fall behind the source the way a
+# copied one does: the man page and the three completion files it installs are the same
+# files the repository carries, so a change to them is picked up by the next build instead
+# of by whoever remembers to edit a second copy.
+#
+# Build and install it with:
+#
+#     cd packaging/arch
+#     makepkg -si
+#
+#   -s  build missing dependencies with a fakeroot user, so nothing is built as root and
+#       the package is assembled with the same ownership an official package has. It will
+#       ask for sudo to install the ones that come from your repositories.
+#   -f  rebuild from scratch.  Needed after editing this file or the sources, because
+#       makepkg otherwise reuses src/ and dist/ from the previous run.
+#   -i  install the finished package with pacman, so there is no separate `pacman -U`
+#       step and the install is registered in the database.
+#
+# Run `makepkg -s` instead of `-si` to build without installing, `makepkg --cleanbuild` to
+# discard src/ and dist/ first, and `makepkg -C` to wipe $srcdir before every build.
+
+pkgname=gputop
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A btop-style TUI monitor for AMD Radeon GPUs (amdgpu)"
+arch=('x86_64')
+# Placeholder.  There is no published project page to point this at yet; replace it with
+# the real URL, and point `source` at a VCS fragment such as VCS+https://... if the
+# release tarball is not where the website says it is.
+url="https://github.com/gputop/gputop"
+license=('GPL-3.0-or-later')
+# Python 3.14 is the floor and not a preference: the package is written against it and
+# uses the free-threaded build as readily as the standard one.
+#
+# The other two are gputop's own runtime dependencies, named here rather than bundled.
+# Both are in the Arch repositories (python-textual, python-tomli-w), and pulling them
+# from the system is what keeps this package from carrying a second, privately pinned copy
+# of Textual and Rich that would go out of step with python-textual's.  gputop imports
+# textual for the interface and tomli-w to write the [state] section back into the config
+# file; without either of them `gputop --version` fails with an ImportError, which is why
+# they are dependencies and not comments.
+depends=('python>=3.14' 'python-textual' 'python-tomli-w')
+# The interpreter the console script's shebang names.  A `#!/usr/bin/env python` shebang
+# would work today and break the day python points somewhere else.
+PYTHON=/usr/bin/python
+makedepends=('uv' 'python-hatchling')
+# The per-block panel is off by default and optional twice over: the amdgpu driver only
+# exposes its per-block busy counters through a privileged radeon ioctl, so gputop reads
+# them by running radeontop as a child process.  gputop itself never needs root; only that
+# child inherits whatever radeontop needs.  A machine without it loses one panel and
+# nothing else.
+optdepends=(
+  'radeontop: per-block utilisation panel (needs privileges)'
+)
+provides=('gputop')
+# The release tarball, downloaded from the URL above.
+source=("$pkgname-$pkgver.tar.gz")
+# SKIP is a placeholder, not a decision.  A release checksum has to come from whoever
+# published the release -- the project's download page, its release notes, or a signature
+# made with a key whose fingerprint you have checked -- and not from the copy that just
+# landed in the download directory, because a checksum of the wrong bytes is exactly what
+# it is meant to catch.  `makepkg -g` prints the sha256sum of the file it fetched, which
+# tells you nothing on its own; confirm the published value first, then replace SKIP:
+#
+#     sha256sum=('<the checksum from the release, in the 64 hex digits makepkg prints>')
+#
+# Until that line is filled in this PKGBUILD is for local use only, and anyone else
+# running it gets no integrity check at all.
+sha256sums=('SKIP')
+
+# gputop is pure Python with no build-time configuration, so "building" it is building one
+# wheel.  An sdist would be more portable to build and less useful to install, since the
+# wheel is what carries the metadata -- including the runtime dependencies above.
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    uv build --wheel
+}
+
+# The staging function is package(), which is the name makepkg looks for, and that is also
+# why it is not called install().  A shell function shadows a program of the same name, so
+# a PKGBUILD that defines install() and then calls `install -Dm644 ...` inside it re-enters
+# its own function with the wrong arguments, over and over, until the shell runs out of
+# stack and dies.  Naming it package() is the convention that settles the question before
+# it can be asked.
+#
+# There is no check() step.  Anything worth checking about the interface needs a terminal
+# and a GPU, and a PKGBUILD has neither; what *is* checkable -- that the staged copy
+# imports, and that the generated console script starts -- is checked at the end of
+# package(), against $pkgdir rather than against whatever is already installed.
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+
+    # A scalar rather than an array: makepkg runs this file under `set -o nounset`, and a
+    # one-element array has no index 1 to read.  build() writes exactly one wheel, so the
+    # glob resolving to a single path is the normal case, not an assumption.
+    local wheel purelib
+    wheel=$(printf '%s\n' "$srcdir/$pkgname-$pkgver"/dist/gputop-*.whl)
+    # $PYTHON, not a bare `python`: the shebang written into the console script below names
+    # one interpreter, and asking a different one where site-packages are would stage the
+    # package into a directory the shebang's python will never look in.
+    purelib=$("$PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+
+    if [ ! -f "$wheel" ]; then
+        printf 'build() left no wheel in %s/dist\n' "$srcdir/$pkgname-$pkgver" >&2
+        return 1
+    fi
+
+    # A wheel is a zip of the package plus its dist-info, so unpacking it into
+    # site-packages *is* the install.  The stdlib's zipfile module does it rather than
+    # bsdtar, because the interpreter is already a build dependency and bsdtar would be
+    # one more thing that has to be installed before this recipe can be debugged.
+    install -d "$pkgdir$purelib"
+    "$PYTHON" -m zipfile -e "$wheel" "$pkgdir$purelib"
+
+    # The console script.  A wheel does not carry one: installers generate it from the
+    # entry point recorded in gputop-*.dist-info/entry_points.txt, so this is that same
+    # shim written out.  It imports gputop.cli rather than gputop.__main__ on purpose --
+    # the latter raises SystemExit at import time, which turns "run the program" into
+    # "exit while importing it".
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/gputop" <<EOF
+#!$PYTHON
+# Generated by package(); see packaging/arch/PKGBUILD.  Regenerated on every build.
+import re
+import sys
+
+from gputop.cli import main
+
+if __name__ == "__main__":
+    sys.argv[0] = re.sub(r"(-script\.pyw|\.exe)?\$", "", sys.argv[0])
+    sys.exit(main())
+EOF
+
+    # The man page and the three completion files are packaging rather than code, so they
+    # are not in the wheel; they are read from the source tree this PKGBUILD ships in.
+    #
+    # Each one is installed under the name its shell expects, which is not always the name
+    # it has in the repository: bash-completion wants an extensionless "gputop", and zsh
+    # wants the leading underscore that marks a file as a completion function.
+    install -Dm644 packaging/man/gputop.1 \
+        "$pkgdir/usr/share/man/man1/gputop.1"
+    install -Dm644 packaging/completions/gputop.bash \
+        "$pkgdir/usr/share/bash-completion/completions/gputop"
+    install -Dm644 packaging/completions/gputop.zsh \
+        "$pkgdir/usr/share/zsh/site-functions/_gputop"
+    install -Dm644 packaging/completions/gputop.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/gputop.fish"
+
+    # Prove that what was just staged runs, from the staged copy rather than from whatever
+    # is already installed.  PYTHONPATH puts $pkgdir ahead of the system site-packages.
+    #
+    # A missing runtime dependency is reported and not raised: those are declared in
+    # depends(), makepkg -s installs them before build(), and a recipe that failed its own
+    # package step because the *system* lacked a dependency would be reporting someone
+    # else's problem as its own.  gputop itself is what must be staged correctly, and it is.
+    if ! PYTHONPATH="$pkgdir$purelib" "$PYTHON" - <<'EOF'
+import sys
+
+try:
+    import textual  # noqa: F401
+    import tomli_w  # noqa: F401
+except ImportError as exc:
+    print(f"warning: runtime dependency missing on this machine: {exc}", file=sys.stderr)
+    raise SystemExit(1) from None
+
+import gputop
+from gputop.cli import main  # noqa: F401
+
+print(f"staged {gputop.__file__} (textual {textual.__version__})")
+EOF
+    then
+        PYTHONPATH="$pkgdir$purelib" "$pkgdir/usr/bin/gputop" --version
+    fi
+}

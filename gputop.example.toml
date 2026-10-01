@@ -5,7 +5,8 @@
 #
 # Precedence, lowest to highest:
 #   built-in defaults -> this file -> $GPUTOP_CONFIG -> ~/.config/gputop/gputop.toml
-#                       -> ~/.gputoprc -> command line flags
+#                       -> ~/.gputoprc -> the [state] section gputop saved for itself
+#                       -> command line flags
 
 [general]
 # Sampling interval in milliseconds.  The procfs scan is the expensive part of a sample,
@@ -19,24 +20,159 @@ history_points = 300
 show = true
 # Rows to display; the busiest clients are kept.
 max_rows = 20
-# Hide processes below this engine utilisation.
+# One of: total (the sum across every engine, the default), pid, user, command, gfx,
+# compute, dma, endcdc, vram, gtt.  "total" sorts but is not displayed: it is the sum of
+# the four engine columns, and a tenth column repeating it would cost width for nothing.
+sort = "total"
+# Hide clients whose total engine utilisation stays below this percentage.  0 keeps
+# everything that is doing *anything*; 0.1 hides the sub-percent noise a compositor makes.
 min_usage_percent = 0.0
+# Hide clients with no argument vector, i.e. kernel threads.  They cannot be signalled and
+# are rarely what a user is looking for.
+hide_kernel_threads = true
+# Nest the table by parent process, from /proc/<pid>/status PPid.
+process_tree = false
+# Show the full /proc/<pid>/cmdline instead of the 15-character comm name.
+full_command = false
+# Show clients that hold a descriptor but use no measurable GPU time.  Off by default:
+# a client that is not using the GPU is not what this table is for.
+show_idle = false
+# Allow "k" to signal the selected process.  Off by default, because terminating another
+# process from a monitor is one keystroke away from terminating the wrong one.  When it
+# is on, the signal is still chosen from a confirmation dialog that names the target.
+allow_kill = false
 
 [ui]
 # One of: default, dracula, gruvbox.  Also switchable at runtime with the "m" key.
 theme = "default"
 # Disable 24-bit colour and fall back to the terminal's own ANSI palette.
 no_color = false
+# Rows in the utilisation graph.  0 -- the default -- lets the graph fill whatever the
+# responsive layout can spare, which is large on a big terminal and small on a small one
+# without anyone configuring anything.  A positive value pins it to that many rows, for
+# anyone who wants a tall graph and is tired of it shrinking every time they resize; it is
+# clamped down rather than allowed to push the footer off the bottom of the screen.
+#
+# There is no "points per graph" key here on purpose.  general.history_points above sizes
+# the sampler's history buffer, the graphs read from that buffer, and a graph cannot hold
+# more samples than the buffer feeding it -- so a second number could only ever have been
+# one key silently capping the other.
+graph_height = 0
 
 [gpu]
 # "auto", "igpu" or "dgpu".  Forcing the classification overrides the heuristics, which is
 # useful for an APU the probes misjudge.
 kind = "auto"
 
+# Restrict monitoring to these cards.  Empty means every amdgpu device found, which is what
+# a single-GPU machine wants and what a multi-GPU one usually has to narrow deliberately.
+#
+# A card may be named three ways, because a user has three plausible things to write and
+# only one of them is the address the --dump output shows: the full PCI address, the same
+# address without the domain, or the cardN sysfs node.
+#
+# devices = ["0000:0c:00.0", "card1"]
+#
+# An entry that matches no card is reported in the status line and ignored, so a typo in
+# one element does not silently shorten the list.  A filter matching none at all falls back
+# to every card rather than none: blanking the monitor is a worse answer to a configuration
+# mistake than showing one card too many, and the warning still names what was not found.
+devices = []
+
 # Marketing names for cards not in the built-in table, keyed by PCI address.  The address
 # is shown by: gputop --devices
 [gpu.names]
 # "0000:0c:00.0" = "AMD Radeon RX 7900 XTX"
 
-[diagnostics]
-dump_format = "json"
+[blocks]
+# Show the per-block utilisation panel, which is fed by running "radeontop -d -" as a child
+# process and parsing its dump output.
+#
+# Off by default, deliberately.  The amdgpu driver only exposes its per-block busy counters
+# through a privileged radeon ioctl, so the counters are read the one way that does not make
+# gputop itself privileged -- and on most unprivileged systems radeontop's answer is "are
+# you root?".  A default-on panel would therefore put a permanent complaint in the status
+# line of every user who cannot use it, and would launch a process that reaches for the GPU
+# the moment gputop starts.  Opting in says you have checked that radeontop works for you.
+#
+# Also settable per run with the --blocks / --no-blocks flags, which override this key.
+#
+# gputop itself never needs root; only the radeontop child inherits whatever privilege
+# radeontop needs.  If radeontop is missing or refused, the panel is hidden and the status
+# line says why (not installed, not permitted, unsupported card, or failed).
+enabled = false
+# Program name looked up on $PATH, or an absolute path to the binary.  Set this when
+# radeontop is installed somewhere the shell profile can see and $PATH cannot.
+binary = "radeontop"
+# Samples per second asked of radeontop.  Higher is more accurate and costs more CPU.
+ticks = 120
+# Seconds between dumps.  Whole seconds only: radeontop parses -i with atoi and floors it
+# at 1, so a sub-second request would be honoured here and ignored by the child.  A value
+# outside the accepted range is clamped with a warning rather than rejected.
+interval_s = 1
+# Where the DRM nodes live, so gputop can pass -p to radeontop.  A DRM node path is
+# preferred over a PCI bus number because the bus alone is ambiguous when two cards sit
+# behind the same bridge, and another card's numbers would be worse than none.
+drm_root = "/dev/dri"
+# Restart a radeontop child that dies mid-session -- a driver reload or a hot-unplugged
+# eGPU should not silence the panel permanently.  Restarts are bounded, and a missing
+# binary or a refused ioctl is never retried, because it will refuse again just as fast.
+restart = true
+
+[alerts]
+# Flash the panel borders when a reading crosses a threshold.
+#
+# The state is recomputed from scratch every sample, so a condition that clears stops being
+# reported the moment it clears: the border can only ever flash because something is
+# actually wrong right now.
+enabled = true
+# Hottest sensor in Celsius; 0 disables the temperature check.  Thresholds are absolute
+# rather than derived because there is no honest way to derive "too hot" from what the card
+# reports -- the junction limit is a property of the silicon.  Values above 125 are clamped:
+# that is where every AMD part is already throttling hard enough for the number to stop
+# being informative.
+temp_c = 90.0
+# Power draw as a percentage of the enforced cap; 0 disables.  Capped at 100.
+power_percent = 95.0
+# VRAM in use as a percentage of the pool; 0 disables.  Capped at 100.
+vram_percent = 92.0
+# Full flash cycles per second while a threshold is crossed; 0 to 20.  0 holds a steady
+# border instead of flashing, for anyone who finds a flashing panel intolerable -- it is not
+# the same as switching alerting off.
+flash_hz = 1.0
+
+[log]
+# Nothing here turns recording on: only "--log PATH" does.  This section configures how a
+# recording is written, so a wrapper script that records every session does not have to
+# repeat the same two options every time.
+#
+# The filename decides everything else: the suffix before any .zst/.zstd picks the format
+# (.csv or .json) and a trailing .zst or .zstd means zstd-compressed.  Files are appended
+# to and flushed per record, so an interrupted recording is still readable.
+# zstd compression level for a .zst target; 1-19, or 0 for the library default.  Values
+# outside the range are clamped with a warning rather than failing at the first write.
+zstd_level = 3
+# Seconds between records; 0 records every sample.  A positive value thins the stream:
+# a 100 ms sampler writes 36 000 rows an hour, most of them the same idle card.  Thinning
+# is off by default because a recording with gaps in it is a recording that lost samples,
+# and choosing to lose them is yours to make rather than gputop's.
+interval_s = 0.0
+
+# ---------------------------------------------------------------------------
+# Written by gputop itself; you do not need to create it.
+#
+# Every field records a choice made while watching rather than a setting decided in
+# advance, so the [state] section wins over the values above -- that is the whole point of
+# it.  Delete the section to go back to whatever this file says.
+# ---------------------------------------------------------------------------
+# [state]
+# theme = "dracula"
+# interval_ms = 1000
+# process_sort = "gfx"
+# process_sort_reverse = true
+# process_filter = ""
+# show_idle_processes = false
+# show_process_tree = false
+# full_command = false
+# overview = false
+# gpu_index = 0

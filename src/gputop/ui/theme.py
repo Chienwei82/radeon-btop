@@ -132,7 +132,12 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     if len(text) != 6:
         # A malformed colour in a custom theme should degrade, not explode mid-render.
         return 255, 255, 255
-    return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    try:
+        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    except ValueError:
+        # Right length, wrong alphabet: ``#zzzzzz`` reaches int() just as surely as a
+        # short string does, and the promise above has to cover both.
+        return 255, 255, 255
 
 
 def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:

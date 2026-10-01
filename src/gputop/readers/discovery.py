@@ -5,6 +5,7 @@ is skipped silently: the specification deliberately has no vendor abstraction la
 """
 
 import re
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -113,6 +114,69 @@ def _classify(
         votes_igpu += 1
 
     return "igpu" if votes_igpu >= 2 else "dgpu"
+
+
+def device_tokens(device: AmdgpuDevice) -> frozenset[str]:
+    """Every lower-cased spelling of this device that ``gpu.devices`` may name.
+
+    Three, because a user has three plausible things to write and only one of them is the
+    address the ``--dump`` output shows them:
+
+    * the full PCI address, ``0000:0c:00.0`` -- what ``[gpu.names]`` is keyed by and what
+      every diagnostic prints;
+    * the same address without the domain, ``0c:00.0`` -- which is how the header renders
+      it, and how it is written in a bug report;
+    * the sysfs node, ``card1`` -- which is what a user reading ``ls /sys/class/drm``
+      actually sees.
+
+    The domain is the only thing dropped, matching :func:`gputop.ui.app.short_bdf`, which
+    renders that same shortened form.  A device with no resolvable address contributes
+    just its card name.
+    """
+    tokens = {device.card.lower(), device.bdf.lower()}
+    parts = device.bdf.split(":")
+    if len(parts) == 3:
+        tokens.add(":".join(parts[1:]).lower())
+    return frozenset(token for token in tokens if token)
+
+
+def select_devices(
+    devices: Sequence[AmdgpuDevice], requested: Sequence[str]
+) -> tuple[tuple[AmdgpuDevice, ...], tuple[str, ...]]:
+    """Narrow *devices* to those named by the ``gpu.devices`` config key.
+
+    Args:
+        devices: Everything discovery found, in its own order.
+        requested: The configured names.  Empty means "no filter".
+
+    Returns:
+        The selected devices in *discovery* order, and the requested names that matched
+        none of them.
+
+    A requested name that matches nothing is reported rather than honoured, and a filter
+    that matches nothing at all falls back to every device.  Both halves matter: silently
+    dropping an unmatched entry would turn a typo in one element of a two-card filter into
+    a monitor watching one card with nothing to say so, and honouring the filter strictly
+    would replace the monitor with "no amdgpu device found", which is a different and
+    wrong answer to a question the user did not ask.  The caller turns the unmatched names
+    into a warning naming them, so the configuration error is still visible.
+
+    Order is preserved rather than reordered to the config's, because a device's ``index``
+    is its position in exactly this sequence -- it is what the focus state, the per-device
+    radeontop arguments and the dump output all address the card by.
+    """
+    wanted = {name.strip().lower() for name in requested if name.strip()}
+    if not wanted:
+        return tuple(devices), ()
+    selected = tuple(device for device in devices if device_tokens(device) & wanted)
+    if selected:
+        return selected, tuple(sorted(name for name in wanted if not _any_match(devices, name)))
+    return tuple(devices), tuple(sorted(wanted))
+
+
+def _any_match(devices: Sequence[AmdgpuDevice], name: str) -> bool:
+    """Whether any device answers to *name*."""
+    return any(name in device_tokens(device) for device in devices)
 
 
 def discover_devices(

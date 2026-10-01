@@ -19,6 +19,7 @@ from gputop.model.metrics import (
     Temperature,
     ThrottleInfo,
 )
+from gputop.ui.devices import TAB_GAP, TAB_SEPARATOR, device_at, gpu_tabs, tab_spans
 from gputop.ui.format import NA, fmt_duration
 from gputop.ui.panels import (
     LABEL_WIDTH,
@@ -428,3 +429,84 @@ class TestGradientPlumbing:
             stat_row("GPU", "50%", 50.0, DEFAULT_THEME, 40, gradient=Gradient(DEFAULT_THEME))
         )
         assert built == shared
+
+
+class TestTabGeometry:
+    """The tab bar's hit testing is arithmetic over the line it just drew.
+
+    A span that disagrees with the drawing by one cell per tab is invisible in a
+    screenshot and puts a click on the wrong GPU -- and the mouse tests that use
+    ``tab_spans`` to pick a cell cannot catch it, because they ask the same function
+    where to click.  These assert the two against each other instead.
+    """
+
+    def _devices(self, count: int) -> list[AmdgpuMetrics]:
+        return [
+            make_metrics(
+                device=make_device(index=index, card=f"card{index}", name=f"GPU{index}"),
+                gpu_busy_percent=50.0,
+            )
+            for index in range(count)
+        ]
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 9, 10, 12])
+    def test_the_spans_add_up_to_the_drawn_line(self, count: int) -> None:
+        devices = self._devices(count)
+        # Wide enough not to truncate: the bar crops itself at the terminal width, and
+        # this is about the arithmetic, not about cropping.
+        line = gpu_tabs(devices, DEFAULT_THEME, index=0, available=1000)
+        spans = tab_spans(devices)
+        assert sum(end - start for start, end, _ in spans) == len(line.plain)
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 9, 10, 12])
+    def test_each_span_starts_on_its_own_number_badge(self, count: int) -> None:
+        """The badge is the first thing drawn, so the span has to reach it.
+
+        A span carries the gutter that precedes its tab, so the badge sits one cell past
+        the gap -- and the number widens past one digit at the tenth GPU, which is exactly
+        where an assumption of a fixed badge width stops holding.
+        """
+        devices = self._devices(count)
+        line = gpu_tabs(devices, DEFAULT_THEME, index=0, available=1000).plain
+        for start, _end, position in tab_spans(devices):
+            badge = str(position + 1)
+            at = start + (TAB_GAP if position else 0) + 1
+            assert line[at : at + len(badge)] == badge
+
+    def test_the_gutter_belongs_to_the_tab_that_follows_it(self) -> None:
+        devices = self._devices(3)
+        line = gpu_tabs(devices, DEFAULT_THEME, index=0, available=1000).plain
+        first_end = tab_spans(devices)[0][1]
+        assert set(line[first_end : first_end + TAB_GAP]) <= {" ", TAB_SEPARATOR}
+        assert device_at(devices, first_end) == 1
+        assert device_at(devices, first_end - 1) == 0
+
+    @pytest.mark.parametrize("name", ["显卡", "Ünïcödé GPU", "🎮"])
+    def test_a_wide_device_name_is_measured_in_cells_not_code_points(self, name: str) -> None:
+        """``[gpu.names]`` is user-supplied, and a CJK or emoji name is a normal thing to put in it.
+
+        ``tab_width`` used ``len()``, which is code points: ``len("显卡")`` is 2 where the
+        name occupies 4 cells.  Every boundary after it was short by the difference, so
+        the last GPU's tab started early and the right-hand end of the bar belonged to no
+        tab at all -- a click there hit nothing, and a click just before it hit the wrong
+        GPU.  The whole test suite was blind to it because every fixture name is ASCII.
+        """
+        from rich.cells import cell_len
+
+        devices = [
+            make_metrics(
+                device=make_device(index=0, card="card0", name=name),
+                gpu_busy_percent=50.0,
+            ),
+            make_metrics(
+                device=make_device(index=1, card="card1", name="Second"),
+                gpu_busy_percent=10.0,
+            ),
+        ]
+        line = gpu_tabs(devices, DEFAULT_THEME, index=0, available=1000)
+        spans = tab_spans(devices)
+        # Spans are in cells, so they have to sum to the drawn cell width, not its
+        # code-point length.
+        assert sum(end - start for start, end, _ in spans) == cell_len(line.plain)
+        # And the far end of the bar has to belong to the last tab rather than to nothing.
+        assert device_at(devices, cell_len(line.plain) - 1) == 1

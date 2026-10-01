@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from rich.style import Style
 from rich.text import Text
 
+from gputop.model.blocks import BLOCK_LABEL_WIDTH, BlocksStatus, ClockReading, GpuBlocks
 from gputop.model.metrics import AmdgpuMetrics, Clock, MemoryPool
 from gputop.ui.format import (
     NA,
@@ -27,13 +28,12 @@ BAR_FILLED = "█"
 BAR_EMPTY = "░"
 
 
-def _rule(theme: Theme, width: int) -> Text:
-    """A horizontal divider."""
-    return Text("─" * max(0, width), Style(color=theme.track))
-
-
 #: Columns reserved for the left-hand label, wide enough for "temp junction".
 LABEL_WIDTH = 14
+
+#: Marks a row as an overdrive ceiling rather than a live measurement.  Kept as a constant
+#: because the profile panel has to reserve room for it when it sizes that column.
+OD_PREFIX = "OD "
 
 
 def fit_bar_width(
@@ -54,6 +54,8 @@ def stat_row(
     theme: Theme,
     available: int,
     gradient: Gradient | None = None,
+    *,
+    label_width: int = LABEL_WIDTH,
 ) -> Text:
     """Build one ``label  bar  value`` line that fits ``available`` columns.
 
@@ -64,14 +66,17 @@ def stat_row(
         theme: Palette.
         available: Total columns the row may occupy.
         gradient: Ramp used to colour the bar; built from ``theme`` when omitted.
+        label_width: Columns reserved for the label.  The blocks panel passes a wider one
+            because hardware block names are longer than sensor names; the label is not
+            truncated to fit, so a caller that passes too small a value overflows the row.
 
     An unavailable reading draws an empty bar and prints ``N/A``.  A full bar for a
     missing value would be the single most misleading thing this UI could do.
     """
     ramp = gradient or Gradient(theme)
     text = Text(no_wrap=True, overflow="crop", end="")
-    text.append(label.ljust(LABEL_WIDTH), Style(color=theme.muted))
-    width = fit_bar_width(available, len(value) + 1)
+    text.append(label.ljust(label_width), Style(color=theme.muted))
+    width = fit_bar_width(available, len(value) + 1, label=label_width)
     if fraction is None:
         text.append(BAR_EMPTY * width, Style(color=theme.track))
         text.append(f" {NA}", Style(color=theme.muted))
@@ -178,16 +183,6 @@ def utilisation_rows(
     return rows
 
 
-def memory_rows(
-    metrics: AmdgpuMetrics, theme: Theme, width: int = 24, gradient: Gradient | None = None
-) -> list[Text]:
-    """Build both memory rows regardless of device kind."""
-    return [
-        pool_row("VRAM", metrics.vram, theme, width, gradient),
-        pool_row("GTT", metrics.gtt, theme, width, gradient),
-    ]
-
-
 def _clock_row(
     label: str, clock: Clock, theme: Theme, available: int, gradient: Gradient | None
 ) -> Text:
@@ -240,12 +235,10 @@ def sensors_panel(
         )
     )
     cap = metrics.power.cap_w
-    rows.append(
-        Text(
-            f"{' ' * LABEL_WIDTH}cap {fmt(cap)} W" if cap is not None else f"        cap {NA}",
-            Style(color=theme.muted),
-        )
-    )
+    # ``fmt`` already renders a missing cap as ``N/A``, so there is no second arm to keep
+    # in step -- and no way for one of them to end up indented differently from the rest
+    # of the panel.
+    rows.append(Text(f"{' ' * LABEL_WIDTH}cap {fmt(cap)} W", Style(color=theme.muted)))
 
     if metrics.device.supports_fan:
         rows.append(
@@ -293,6 +286,170 @@ def sensors_panel(
     return rows
 
 
+def blocks_panel(
+    blocks: GpuBlocks | None,
+    theme: Theme,
+    available: int,
+    gradient: Gradient | None = None,
+) -> list[Text]:
+    """Build the per-block utilisation panel.
+
+    Every block is a bar on a 0-100 scale, and the groups run together without separators:
+    the model has already grouped them by pipeline stage, and a blank row between groups
+    costs a line of a terminal that may not have one to spare.
+
+    A block at exactly zero still draws an empty bar with a ``0%`` label.  That is not the
+    same as a missing block -- radeontop omits a block the hardware has no unit for, so
+    every row here describes something that exists.
+
+    Args:
+        blocks: The sample, or ``None`` when radeontop has not produced one.  ``None``
+            renders a single explanatory row rather than a column of empty bars, because
+            fourteen ``N/A`` labels answer nothing.
+        theme: Palette.
+        available: Columns the panel may occupy.
+        gradient: Ramp for the bars; built from ``theme`` when omitted.
+    """
+    ramp = gradient or Gradient(theme)
+    if blocks is None:
+        return [Text("waiting for radeontop", Style(color=theme.muted))]
+
+    rows: list[Text] = []
+    for group in blocks.display_rows():
+        for reading in group:
+            if isinstance(reading, ClockReading) and reading.mhz is not None:
+                # A clock has an absolute frequency worth more than a bare percentage, so
+                # the bar shows utilisation and the text shows the number being read.
+                value = f"{reading.mhz:,} MHz"
+            else:
+                # Falling back to the percentage rather than to N/A: a clock whose
+                # frequency radeontop did not report still has a utilisation figure, and
+                # printing N/A beside a bar that is plainly filled contradicts itself.
+                value = fmt_percent(reading.percent)
+            rows.append(
+                stat_row(
+                    reading.label,
+                    value,
+                    reading.percent,
+                    theme,
+                    available,
+                    ramp,
+                    label_width=BLOCK_LABEL_WIDTH,
+                )
+            )
+    if not rows:
+        return [Text("no blocks reported", Style(color=theme.muted))]
+    return rows
+
+
+def blocks_heading(blocks: GpuBlocks | None) -> str:
+    """A one-line heading naming the busiest block, or a neutral title.
+
+    Putting the answer in the panel's title is what makes this panel worth opening: "which
+    block is busy" is the question, and the bars are the evidence.
+    """
+    if blocks is None:
+        return "Blocks"
+    busiest = blocks.busiest()
+    if busiest is None:
+        return "Blocks"
+    return f"Blocks · {busiest.label} {busiest.percent:.0f}%"
+
+
+def power_profile_panel(
+    metrics: AmdgpuMetrics,
+    theme: Theme,
+    available: int,
+    gradient: Gradient | None = None,
+) -> list[Text]:
+    """Build the read-only power-profile and overdrive panel.
+
+    Everything shown here is a value the driver published, read once per sample.  Nothing in
+    this panel, or anywhere else in gputop, writes to these files: the panel exists to show
+    what the card is set to, and a monitor that could change the setting from a keystroke
+    would be a different and much more dangerous program.
+
+    Args:
+        metrics: The sample carrying ``odc`` and ``profiles``.
+        theme: Palette.
+        available: Columns the panel may occupy.
+        gradient: Ramp for the overdrive bars; built from ``theme`` when omitted.
+    """
+    ramp = gradient or Gradient(theme)
+    rows: list[Text] = []
+    # Detail rows are indented to the blocks panel's wider label column rather than the
+    # sensors' 14, so the two panels sitting side by side share one left edge.
+    indent = " " * BLOCK_LABEL_WIDTH
+
+    def detail(label: str, value: str, colour: str) -> Text:
+        """One indented ``label value`` row, trimmed to the panel width.
+
+        Trimmed here rather than left to the widget's own cropping.  A row that is merely
+        "no-wrap, crop" still measures as two lines tall in Textual, and a panel sized
+        ``height: auto`` from a row that renders taller than it lays out draws the overflow
+        over its own bottom border.  Fitting the text to the width is what keeps the box
+        and its contents the same size.
+        """
+        text = f"{indent}{label} {value}".rstrip()
+        if len(text) > available:
+            # An ellipsis, so a truncated list reads as truncated rather than as a list
+            # that happens to end there.
+            text = text[: max(0, available - 1)].rstrip() + "…"
+        return Text(text, Style(color=colour), no_wrap=True, overflow="crop")
+
+    table = metrics.profiles
+    active = table.active_name or metrics.power_profile
+    rows.append(
+        detail(
+            "profile",
+            active if active else NA,
+            theme.text if active else theme.muted,
+        )
+    )
+    if table.profiles:
+        entry = table.active
+        rows.append(
+            detail(
+                "index",
+                f"{entry.index if entry is not None else NA} of {len(table.profiles)}",
+                theme.muted,
+            )
+        )
+        others = [p.name for p in table.profiles if p.name != active]
+        if others:
+            # Trimmed, not wrapped: a wrapped row draws over the panel's bottom border.  The
+            # complete list is in the JSON dump and the session log, so shortening it here
+            # costs nothing that cannot be got elsewhere.
+            rows.append(detail("available", ", ".join(others), theme.muted))
+    else:
+        rows.append(detail("profiles", NA, theme.muted))
+
+    odc = metrics.odc
+    if odc.domains:
+        for domain in odc.domains:
+            rows.append(
+                stat_row(
+                    f"{OD_PREFIX}{domain.label}",
+                    domain.describe(),
+                    domain.percent,
+                    theme,
+                    available,
+                    ramp,
+                    # Three columns wider than the block labels: the "OD " prefix is part
+                    # of this row's label, and reserving space for it is what stops the
+                    # bar starting flush against the longest one.
+                    label_width=BLOCK_LABEL_WIDTH + len(OD_PREFIX),
+                )
+            )
+        if odc.vddgfx_offset_mv is not None:
+            sign = "+" if odc.vddgfx_offset_mv >= 0 else ""
+            rows.append(detail("vddgfx", f"{sign}{odc.vddgfx_offset_mv} mV", theme.muted))
+    else:
+        rows.append(detail("overdrive", NA, theme.muted))
+    rows.append(detail("read-only", "", theme.muted))
+    return rows
+
+
 def footer_panel(
     theme: Theme,
     *,
@@ -303,8 +460,27 @@ def footer_panel(
     visible: int | None = None,
     total: int | None = None,
     warnings: Sequence[str] = (),
+    blocks_status: BlocksStatus = BlocksStatus.OK,
+    blocks_hint: str = "",
 ) -> Text:
-    """Build the status line above the key hints."""
+    """Build the status line above the key hints.
+
+    The blocks hint is filtered here rather than by the caller so that the policy -- explain
+    a problem, but stay silent about a deliberate choice -- lives with the line that shows
+    it and can be asserted on directly.
+
+    Args:
+        blocks_status: Whether the optional block panel is working.
+        blocks_hint: A more specific explanation to show in place of the status's own.
+
+    Deliberately silent for :attr:`BlocksStatus.OK` and :attr:`BlocksStatus.DISABLED`: a
+    user who turned the panel off chose that, and reminding them every second would train
+    them to ignore the part of the status line that matters.  The other statuses are all
+    cases where the user asked for data and is not getting it.
+    """
+    hint = ""
+    if blocks_status not in (BlocksStatus.OK, BlocksStatus.DISABLED):
+        hint = blocks_hint or blocks_status.hint
     text = Text(no_wrap=True, overflow="crop", end="")
     text.append(f"#{sequence}", Style(color=theme.muted))
     text.append("  ·  ", Style(color=theme.track))
@@ -324,9 +500,21 @@ def footer_panel(
             f"partial {visible}/{total} procs",
             Style(color=theme.warn),
         )
-    for warning in warnings[:1]:
+    if warnings:
+        # The first warning, then a count for the rest.  Showing only the first was silent
+        # truncation: the sampler raises one warning per failing device, so a two-GPU
+        # machine with one unreadable card reported that card and the other disappeared
+        # with no trace.  The count keeps the line from pushing the blocks hint off the
+        # right edge while still admitting that something was withheld.
         text.append("  ·  ", Style(color=theme.track))
-        text.append(warning, Style(color=theme.alert))
+        text.append(warnings[0], Style(color=theme.alert))
+        if len(warnings) > 1:
+            text.append(f" (+{len(warnings) - 1} more)", Style(color=theme.warn))
+    if hint:
+        # After warnings, and in the muted colour rather than the alert colour: a missing
+        # radeontop is a fact about the installation, not a fault in the GPU.
+        text.append("  ·  ", Style(color=theme.track))
+        text.append(f"blocks: {hint}", Style(color=theme.muted))
     return text
 
 
@@ -337,14 +525,3 @@ def _cpu_number(text: str) -> float:
         return float(digits)
     except ValueError:
         return 0.0
-
-
-def device_tab(metrics: AmdgpuMetrics, active: bool) -> Text:
-    """Build a compact tab for the device switcher."""
-    theme_style = Style(bold=True) if active else Style()
-    text = Text(no_wrap=True, overflow="crop", end="")
-    text.append(
-        f" {metrics.device.name} ",
-        theme_style + Style(color="white" if active else "grey62"),
-    )
-    return text

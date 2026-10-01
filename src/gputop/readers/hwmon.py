@@ -17,17 +17,27 @@ from gputop.readers.fsutil import (
 
 TEMP_FILE_PATTERN = re.compile(r"^temp(\d+)_input$")
 
-#: Canonical names for the labels AMD uses, longest-match first so that "junction"
-#: is not shadowed by a shorter accidental prefix.
-LABEL_MAP: tuple[tuple[str, str], ...] = (
-    ("junction", "junction"),
-    ("hotspot", "junction"),
-    ("edge", "edge"),
-    ("mem", "mem"),
-    ("soc", "soc"),
-    ("core", "core"),
-    ("l3", "l3"),
-    ("vr", "vr"),
+#: Canonical names for the labels AMD uses, keyed by the substring that identifies them.
+#:
+#: Sorted longest-first at import rather than written in that order, because the order is
+#: load-bearing and hand-maintained order drifts: a future entry added at the end could
+#: shadow an existing one, and the comment claiming otherwise would not catch it.  The
+#: entries are a substring search, not exact names, because AMD's labels carry prefixes
+#: ("temp1: mem", "junction") that vary between boards.
+LABEL_MAP: tuple[tuple[str, str], ...] = tuple(
+    sorted(
+        (
+            ("junction", "junction"),
+            ("hotspot", "junction"),
+            ("edge", "edge"),
+            ("mem", "mem"),
+            ("soc", "soc"),
+            ("core", "core"),
+            ("l3", "l3"),
+            ("vr", "vr"),
+        ),
+        key=lambda pair: -len(pair[0]),
+    )
 )
 
 #: Ordering used when presenting the sensor panel.

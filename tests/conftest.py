@@ -181,6 +181,10 @@ def make_process(
     drm_node: str = "/dev/dri/renderD128",
     fdinfo: Sequence[str] | None = None,
     extra_fds: Sequence[str] = (),
+    ppid: int = 1,
+    cmdline: Sequence[str] | None = None,
+    client_id: int = 42,
+    pdev: str = "0000:0c:00.0",
 ) -> Path:
     """Create a fake process holding a DRM descriptor.
 
@@ -192,6 +196,11 @@ def make_process(
         fdinfo: Extra ``fdinfo`` lines appended after the standard DRM header.  Later
             lines win, so a test can override a default such as ``drm-resident-vram``.
         extra_fds: Additional non-DRM descriptors, which must be ignored.
+        ppid: Written to ``status`` as ``PPid``; drives the process tree.
+        cmdline: The argument vector.  Defaults to ``[name]``; an empty sequence
+            produces a kernel thread, which is how the kernel presents one.
+        client_id: The ``drm-client-id`` the process reports.
+        pdev: The ``drm-pdev`` the process reports, which routes it to one GPU.
 
     Returns:
         The path to the created process directory.
@@ -199,6 +208,11 @@ def make_process(
     pid_dir = proc_root / str(pid)
     pid_dir.mkdir(parents=True, exist_ok=True)
     write(pid_dir / "comm", f"{name}\n")
+    # ``status`` is what the parent PID comes from; the real file has a lot more, and
+    # only these two lines are ever parsed.
+    write(pid_dir / "status", f"Name:\t{name}\nPPid:\t{ppid}\n")
+    argv = (name,) if cmdline is None else tuple(cmdline)
+    write(pid_dir / "cmdline", "".join(f"{arg}\0" for arg in argv))
 
     fd_dir = pid_dir / "fd"
     fdinfo_dir = pid_dir / "fdinfo"
@@ -211,8 +225,8 @@ def make_process(
         "pos:\t0",
         "flags:\t02100002",
         "drm-driver:\tamdgpu",
-        "drm-client-id:\t42",
-        "drm-pdev:\t0000:0c:00.0",
+        f"drm-client-id:\t{client_id}",
+        f"drm-pdev:\t{pdev}",
         "drm-total-vram:\t0 B",
         "drm-resident-vram:\t0 B",
     ]

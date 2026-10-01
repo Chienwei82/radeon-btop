@@ -8,6 +8,14 @@ Layout, verified against a live Navi 21 / RX 6800 (``amdgpu`` 6.19.4, kernel 7.0
         __u8  content_revision;     /* minor revision within the format        */
     };
 
+There is no version *string* anywhere in the file: the identity of a table is the four
+header bytes, and the kernel's ``gpu_metrics_vX_Y`` source structs are exactly
+``format_revision=X, content_revision=Y``.  Which ASIC reports which is not a simple
+dGPU/APU split -- v1_3 is Sienna Cichlid (Navi 21) and other dGPUs, v2_1 is Navi 23/24,
+only v2_2 and later are APU-shaped (they carry ``temperature_core`` and ``temperature_l3``),
+and RDNA3 reports v3_0, which this build deliberately does not decode: an unrecognised
+revision falls back to sysfs rather than being guessed at.
+
 The body follows at offset 4 and is fixed-width little-endian.  ``structure_size``
 bounds the body, which is what makes the parser forward compatible: a driver reporting a
 larger struct is truncated safely, a smaller one yields ``None`` for the missing tail,
@@ -57,10 +65,25 @@ _TEMP_ORDER = ("edge", "junction", "mem", "soc", "core", "l3")
 
 @dataclass(frozen=True, slots=True)
 class _Field:
-    """One named field in a metric table layout."""
+    """One named field in a metric table layout.
+
+    ``count`` is the length of a C array field, and 1 for a scalar.  It is not cosmetic:
+    the amdgpu headers declare several ``gpu_metrics`` members as fixed-size arrays --
+    ``uint16_t temperature_core[8]``, ``temperature_l3[2]``, ``average_core_power[8]``,
+    ``current_coreclk[8]``, ``current_l3clk[2]``,
+    ``temperature_hbm[NUM_HBM_INSTANCES]`` -- and modelling one as a single scalar puts
+    every field *after* it at the wrong offset.  The v2.x layouts, which are the APU ones,
+    were wrong that way: ``average_gfxclk_frequency`` was being read as ``throttle_status``,
+    so an unthrottled APU was reported as power-throttling while its real graphics clock
+    read as 14 MHz.
+
+    Only element 0 is decoded, because the interface shows one number per sensor.  The
+    remaining elements are consumed as pad so the next field lands on its C offset.
+    """
 
     name: str
     code: str
+    count: int = 1
 
 
 def _aligner(
@@ -71,6 +94,11 @@ def _aligner(
     Padding is inserted so each field lands where a C compiler would place it, measured
     from the start of the buffer (offset 0, *including* the header).  That is what makes
     the 64-bit accumulators line up on multiples of eight.
+
+    An array field occupies ``count * size`` bytes.  Only the first element is unpacked --
+    the caller records one reading -- and the rest are consumed as explicit pad, so
+    ``unpack_from`` keeps yielding one value per *field* and the next field still lands
+    on the offset the driver used.
 
     The leading header bytes are emitted as explicit pad.  They consume no values, so
     ``unpack_from`` still yields exactly one value per field, but they do make
@@ -88,7 +116,9 @@ def _aligner(
             offset += size - remainder
         offsets[spec.name] = offset
         fmt += spec.code
-        offset += size
+        if spec.count > 1:
+            fmt += f"{(spec.count - 1) * size}x"
+        offset += size * spec.count
     return fmt, offsets
 
 
@@ -152,7 +182,7 @@ _V1_1_FIELDS: tuple[_Field, ...] = (
     _Field("padding", "H"),
     _Field("gfx_activity_acc", "I"),
     _Field("mem_activity_acc", "I"),
-    _Field("temperature_hbm", "H"),
+    _Field("temperature_hbm", "H", 4),
 )
 
 _V1_2_FIELDS: tuple[_Field, ...] = (*_V1_1_FIELDS, _Field("firmware_timestamp", "Q"))
@@ -172,15 +202,15 @@ _V2_0_FIELDS: tuple[_Field, ...] = (
     _Field("system_clock_counter", "Q"),
     _Field("temperature_gfx", "H"),
     _Field("temperature_soc", "H"),
-    _Field("temperature_core", "H"),
-    _Field("temperature_l3", "H"),
+    _Field("temperature_core", "H", 8),
+    _Field("temperature_l3", "H", 2),
     _Field("average_gfx_activity", "H"),
     _Field("average_mm_activity", "H"),
     _Field("average_socket_power", "H"),
     _Field("average_cpu_power", "H"),
     _Field("average_soc_power", "H"),
     _Field("average_gfx_power", "H"),
-    _Field("average_core_power", "H"),
+    _Field("average_core_power", "H", 8),
     _Field("average_gfxclk_frequency", "H"),
     _Field("average_socclk_frequency", "H"),
     _Field("average_uclk_frequency", "H"),
@@ -193,8 +223,8 @@ _V2_0_FIELDS: tuple[_Field, ...] = (
     _Field("current_fclk", "H"),
     _Field("current_vclk", "H"),
     _Field("current_dclk", "H"),
-    _Field("current_coreclk", "H"),
-    _Field("current_l3clk", "H"),
+    _Field("current_coreclk", "H", 8),
+    _Field("current_l3clk", "H", 2),
     _Field("throttle_status", "I"),
     _Field("fan_pwm", "H"),
     _Field("padding", "H"),
@@ -203,8 +233,8 @@ _V2_0_FIELDS: tuple[_Field, ...] = (
 _V2_1_FIELDS: tuple[_Field, ...] = (
     _Field("temperature_gfx", "H"),
     _Field("temperature_soc", "H"),
-    _Field("temperature_core", "H"),
-    _Field("temperature_l3", "H"),
+    _Field("temperature_core", "H", 8),
+    _Field("temperature_l3", "H", 2),
     _Field("average_gfx_activity", "H"),
     _Field("average_mm_activity", "H"),
     _Field("system_clock_counter", "Q"),
@@ -212,7 +242,7 @@ _V2_1_FIELDS: tuple[_Field, ...] = (
     _Field("average_cpu_power", "H"),
     _Field("average_soc_power", "H"),
     _Field("average_gfx_power", "H"),
-    _Field("average_core_power", "H"),
+    _Field("average_core_power", "H", 8),
     _Field("average_gfxclk_frequency", "H"),
     _Field("average_socclk_frequency", "H"),
     _Field("average_uclk_frequency", "H"),
@@ -225,8 +255,8 @@ _V2_1_FIELDS: tuple[_Field, ...] = (
     _Field("current_fclk", "H"),
     _Field("current_vclk", "H"),
     _Field("current_dclk", "H"),
-    _Field("current_coreclk", "H"),
-    _Field("current_l3clk", "H"),
+    _Field("current_coreclk", "H", 8),
+    _Field("current_l3clk", "H", 2),
     _Field("throttle_status", "I"),
     _Field("fan_pwm", "H"),
     _Field("padding", "H"),
@@ -235,9 +265,25 @@ _V2_1_FIELDS: tuple[_Field, ...] = (
 _V2_2_FIELDS: tuple[_Field, ...] = (*_V2_1_FIELDS, _Field("indep_throttle_status", "Q"))
 
 
-def _build(revision: int, content: int, fields: tuple[_Field, ...]) -> MetricsAbi:
-    """Assemble one registry entry from its field description."""
+def _build(revision: int, content: int, fields: tuple[_Field, ...], size: int) -> MetricsAbi:
+    """Assemble one registry entry, padded out to the kernel's own ``sizeof``.
+
+    The tail matters as much as the gaps.  A C struct is padded to its own alignment, so a
+    layout whose last member is a ``uint8_t`` still occupies a multiple of eight: v1.0 ends
+    on two one-byte link fields, and ``sizeof`` is 80 rather than the 76 its members add
+    up to.  ``Struct.size`` is what the truncation check in
+    :meth:`GpuMetricsParser.parse` trusts, so it has to be the driver's number and not an
+    arithmetic one.
+    """
     fmt, offsets = _aligner(fields)
+    trailing = size - struct.calcsize("<" + fmt)
+    if trailing < 0:
+        raise ValueError(
+            f"v{revision}.{content}: the field list overruns the kernel's sizeof by "
+            f"{-trailing} bytes, so the layout cannot be right"
+        )
+    if trailing:
+        fmt += f"{trailing}x"
     return MetricsAbi(
         fmt_revision=revision,
         content_revision=content,
@@ -250,20 +296,27 @@ def _build(revision: int, content: int, fields: tuple[_Field, ...]) -> MetricsAb
 def _build_registry() -> Mapping[tuple[int, int], MetricsAbi]:
     """Register every layout gputop understands.
 
+    The last element of each entry is ``sizeof(struct gpu_metrics_vX_Y)`` as the kernel
+    declares it, so the computed format is checked against the real thing rather than
+    assumed: a layout that no longer fits raises here, at import, instead of decoding an
+    APU into plausible nonsense.  Deriving the sizes with ``offsetof`` against
+    ``kgd_pp_interface.h`` is how they were established.
+
     Adding support for a new kernel revision is a single entry here plus one test
     fixture; no parser logic changes.
     """
     entries = (
-        (1, 0, _V1_0_FIELDS),
-        (1, 1, _V1_1_FIELDS),
-        (1, 2, _V1_2_FIELDS),
-        (1, 3, _V1_3_FIELDS),
-        (2, 0, _V2_0_FIELDS),
-        (2, 1, _V2_1_FIELDS),
-        (2, 2, _V2_2_FIELDS),
+        (1, 0, _V1_0_FIELDS, 80),
+        (1, 1, _V1_1_FIELDS, 96),
+        (1, 2, _V1_2_FIELDS, 104),
+        (1, 3, _V1_3_FIELDS, 120),
+        (2, 0, _V2_0_FIELDS, 120),
+        (2, 1, _V2_1_FIELDS, 120),
+        (2, 2, _V2_2_FIELDS, 128),
     )
     registry = {
-        (rev, content): _build(rev, content, fields) for rev, content, fields in entries
+        (rev, content): _build(rev, content, fields, size)
+        for rev, content, fields, size in entries
     }
     return MappingProxyType(registry)
 
@@ -457,6 +510,24 @@ class GpuMetricsParser:
             value = raw.get(name)
             return _filter_u64(value) if value is not None else None
 
+        def _energy(name: str) -> int | None:
+            """The energy accumulator, filtered at the width this ABI declares it.
+
+            The field is ``__u32`` in v1.0 and ``__u64`` from v1.1 on, and the driver's
+            "not implemented" marker is an all-ones value of whatever width the field is,
+            written by the ``memset(0xFF, ...)`` that fills an unpopulated struct.  A
+            single fixed filter therefore either misses the v1.0 sentinel -- reporting
+            0xFFFFFFFF as 4 294 967 295 mJ of energy -- or would strip a real reading
+            that happens to be all ones in the wider revisions.
+            """
+            value = raw.get(name)
+            if value is None:
+                return None
+            spec = next((f for f in abi.fields if f.name == name), None)
+            if spec is not None and _SIZE[spec.code] == 4:
+                return _filter_u32(value)
+            return _filter_u64(value)
+
         temperatures: dict[str, Temperature] = {}
         for source_name, label in (*_V1_TEMPERATURE_FIELDS, *_V2_TEMPERATURE_FIELDS):
             if source_name not in raw:
@@ -497,7 +568,12 @@ class GpuMetricsParser:
             mm_activity_percent=_percent(u16("average_mm_activity")),
             temperatures=ordered,
             power_draw_w=_power(u16("average_socket_power")),
-            energy_mj=u64("energy_accumulator"),
+            # The "not implemented" sentinel is a per-field-width all-ones value, and the
+            # driver produces it by memset(0xFF) over the struct it did not fill in.  So
+            # the filter has to match the field's declared width: energy_accumulator is
+            # __u32 in v1.0 and __u64 from v1.1 on, and filtering v1.0 with the 64-bit
+            # sentinel let 0xFFFFFFFF through as an energy reading of 4.3 million joules.
+            energy_mj=_energy("energy_accumulator"),
             sclk_mhz=_clock(u16("current_gfxclk")),
             socclk_mhz=_clock(u16("current_socclk")),
             mclk_mhz=_clock(u16("current_uclk")),

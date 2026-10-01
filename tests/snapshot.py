@@ -69,15 +69,20 @@ async def run_app[T](
             )
         # Layout settles a frame after the widgets are sized; capturing earlier can
         # snapshot a half-laid-out screen that the running app would never show.
-        await _wait_for_stable_layout(app)
+        await wait_for_stable_layout(app)
         if body is None:
             await pilot.pause()
             return None  # type: ignore[return-value]
         return await body(pilot)
 
 
-async def _wait_for_stable_layout(app: App[object], timeout: float = WAIT_TIMEOUT) -> None:
-    """Wait until the widget geometry stops changing between animation frames."""
+async def wait_for_stable_layout(app: App[object], timeout: float = WAIT_TIMEOUT) -> None:
+    """Wait until the widget geometry stops changing between animation frames.
+
+    Public because a test that presses a key and then reads the screen needs the same
+    guarantee as one that only reads it: without it the capture can land between the
+    action and the frame that shows it, and the test fails only on a busy machine.
+    """
     deadline = time.monotonic() + timeout
     previous: tuple[object, ...] | None = None
     while time.monotonic() < deadline:

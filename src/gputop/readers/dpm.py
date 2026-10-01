@@ -1,20 +1,27 @@
 """DPM clock tables, performance level and SCPP power profile.
 
-The ``current_sclk``/``current_mclk`` attributes are documented widely but are **absent**
-on recent drivers (verified absent on ``amdgpu`` 6.19), so every clock lookup has a
-three-level fallback ending in parsing the ``pp_dpm_*`` table and taking the row marked
-with ``*`` as the current state.
+The ``current_sclk`` / ``current_mclk`` / ``current_link_*`` names are widely written down
+as sysfs attributes, and the reference machine does not have them -- but enumerating what
+``amdgpu`` actually registers shows they never did: they are fields of the driver's
+internal ``struct amdgpu_dpm``, not sysfs attributes, and appear in no in-tree release
+(checked at v5.4 and at v7.2).  They are probed anyway, because one failing ``open()`` is
+cheaper than being wrong about a tree that does publish them, and every clock lookup falls
+back to parsing the ``pp_dpm_*`` table and taking the row marked ``*`` as the current state.
+
+Where a clock really comes from is ``gpu_metrics`` (``current_gfxclk`` and friends), the
+hwmon ``freq*_input`` pair, or the ``pp_dpm_*`` level table.
 """
 
 import re
 from pathlib import Path
 
-from gputop.readers.fsutil import parse_first_int, read_text
+from gputop.readers.fsutil import PROFILE_ROW, TABLE_LIMIT, parse_first_int, read_text
 
 # The kernel writes the unit as ``Mhz``/``Uhz``/``Ghz`` -- a lowercase ``h`` -- and marks
-# the active row with a trailing ``*``.
-_DPM_ROW = re.compile(r"^(\S+):\s*(\d+)\s*([MUG]?[Hh]z)\s*(\*)?\s*$")
-_PROFILE_ROW = re.compile(r"^\s*(\d+)\s+([A-Za-z0-9_]+)\s*(\*)?:?\s*$")
+# the active row with a trailing ``*``.  ``Khz`` is included for the same reason: a unit
+# outside the set makes the whole row unmatched, which silently empties the table rather
+# than skipping one line of it.
+_DPM_ROW = re.compile(r"^(\S+):\s*(\d+)\s*([KMUG]?[Hh]z)\s*(\*)?\s*$")
 
 
 def parse_dpm_table(text: str | None) -> tuple[int | None, int | None]:
@@ -33,6 +40,7 @@ def parse_dpm_table(text: str | None) -> tuple[int | None, int | None]:
     if not text:
         return None, None
 
+    first: int | None = None
     current: int | None = None
     maximum: int | None = None
     for line in text.splitlines():
@@ -40,14 +48,18 @@ def parse_dpm_table(text: str | None) -> tuple[int | None, int | None]:
         if match is None:
             continue
         mhz = int(match.group(2))
-        marked = match.group(4) is not None
-        if marked and current is None:
+        if first is None:
+            first = mhz
+        if match.group(4) is not None and current is None:
             current = mhz
         if maximum is None or mhz > maximum:
             maximum = mhz
 
-    if current is None and maximum is not None:
-        current = maximum
+    if current is None:
+        # No row was flagged.  The first row is the lowest DPM state, and an unmarked table
+        # is what an idling APU publishes; reading the ceiling here reported an idle card
+        # as pinned at its maximum clock, and its clock bar at 100%.
+        current = first
     return current, maximum
 
 
@@ -63,13 +75,53 @@ def read_clock(device_dir: Path, attribute: str, dpm_file: str) -> tuple[int | N
         ``(current_mhz, confidence)`` where confidence is 2 for a direct attribute read,
         1 for the DPM table and 0 when nothing was readable.
     """
-    value = parse_first_int(read_text(device_dir / attribute))
-    if value is not None:
-        return value, 2
-    current, _maximum = parse_dpm_table(read_text(device_dir / dpm_file))
+    current, _maximum, confidence = read_clock_pair(device_dir, attribute, dpm_file)
+    return current, confidence
+
+
+def read_clock_pair(
+    device_dir: Path,
+    attribute: str,
+    dpm_file: str,
+    max_attribute: str | None = None,
+) -> tuple[int | None, int | None, int]:
+    """Read a clock's current value and its ceiling, touching each file at most once.
+
+    The obvious implementation -- :func:`read_clock` for the value and :func:`read_clock_max`
+    for the ceiling -- reads the DPM table twice, and on recent drivers, where
+    ``current_sclk``/``current_sclk_max`` no longer exist, *that* table is the only source
+    either of them comes from.  Every clock domain therefore cost four reads where two
+    suffice.  The single source wins here because the ceiling cannot come from anywhere
+    the current value did not.
+
+    Args:
+        device_dir: The device's sysfs directory.
+        attribute: The direct current-value attribute, e.g. ``current_sclk``.
+        dpm_file: The DPM table to fall back to.
+        max_attribute: Direct ceiling attribute, defaulting to ``current_<suffix>_max``.
+
+    Returns:
+        ``(current_mhz, maximum_mhz, confidence)`` with the same confidence scale as
+        :func:`read_clock`.  ``maximum_mhz`` is ``None`` only when nothing at all was
+        readable.
+    """
+    if max_attribute is None:
+        max_attribute = f"{attribute}_max"
+    current = parse_first_int(read_text(device_dir / attribute))
     if current is not None:
-        return current, 1
-    return None, 0
+        maximum = parse_first_int(read_text(device_dir / max_attribute))
+        if maximum is None:
+            # The ceiling attribute can be absent while the current one is present.  The
+            # DPM table still carries it, and without this the bar that draws current
+            # against maximum had no maximum to draw against and read as unknown.
+            _table_current, maximum = parse_dpm_table(
+                read_text(device_dir / dpm_file, limit=TABLE_LIMIT)
+            )
+        return current, maximum, 2
+    table_current, maximum = parse_dpm_table(
+        read_text(device_dir / dpm_file, limit=TABLE_LIMIT)
+    )
+    return table_current, maximum, 1 if table_current is not None else 0
 
 
 def read_clock_max(device_dir: Path, attribute: str, dpm_file: str) -> int | None:
@@ -77,7 +129,7 @@ def read_clock_max(device_dir: Path, attribute: str, dpm_file: str) -> int | Non
     value = parse_first_int(read_text(device_dir / attribute))
     if value is not None:
         return value
-    _current, maximum = parse_dpm_table(read_text(device_dir / dpm_file))
+    _current, maximum = parse_dpm_table(read_text(device_dir / dpm_file, limit=TABLE_LIMIT))
     return maximum
 
 
@@ -101,10 +153,10 @@ def parse_power_profile(text: str | None) -> str | None:
         return None
     fallback: str | None = None
     for line in text.splitlines():
-        match = _PROFILE_ROW.match(line)
+        match = PROFILE_ROW.match(line)
         if match is None:
             continue
-        name = match.group(2)
+        name = match.group(2).strip()
         if fallback is None:
             fallback = name
         if match.group(3) is not None:
@@ -114,7 +166,9 @@ def parse_power_profile(text: str | None) -> str | None:
 
 def read_power_profile(device_dir: Path) -> str | None:
     """Read the active SCPP power profile name."""
-    return parse_power_profile(read_text(device_dir / "pp_power_profile_mode"))
+    return parse_power_profile(
+        read_text(device_dir / "pp_power_profile_mode", limit=TABLE_LIMIT)
+    )
 
 
 def read_link(device_dir: Path) -> tuple[int | None, int | None]:
