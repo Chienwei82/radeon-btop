@@ -26,7 +26,7 @@ complete -c gputop -l json     -d 'emit the --check report as JSON instead of te
 
 # Options with a closed set of values.  -x keeps fish from also offering file names,
 # which would be offering a value gputop rejects.
-complete -c gputop -l theme -x -a 'default dracula gruvbox' -d 'colour theme'
+complete -c gputop -l theme -x -a 'default dracula gruvbox monochrome radeon' -d 'colour theme'
 complete -c gputop -l kind  -x -a 'auto igpu dgpu' -d 'force every device to be classified as integrated or discrete'
 
 # Options with a free-form number.  No candidates: the useful values are the step sizes
