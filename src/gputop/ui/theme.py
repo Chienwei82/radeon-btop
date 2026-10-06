@@ -101,11 +101,45 @@ GRUVBOX_THEME = Theme(
     alert="#fb4934",
 )
 
+MONOCHROME_THEME = Theme(
+    name="monochrome",
+    # A purely greyscale palette: the graph ramps from near-black to white, and the
+    # status colours share the same brightness ladder (dim = healthy, bright = critical).
+    low="#2a2a2a",
+    mid="#aaaaaa",
+    high="#ffffff",
+    accent="#888888",
+    text="#ffffff",
+    muted="#aaaaaa",
+    track="#181818",
+    ok="#2a2a2a",
+    warn="#aaaaaa",
+    alert="#ffffff",
+)
+
+RADECAL_THEME = Theme(
+    name="radeon",
+    # Black base with soft greys and a red that nods to the AMD Red: the graph ramps
+    # from near-black through soft grey to the brand red at saturation.
+    low="#0d0d0d",
+    mid="#8a8a8a",
+    high="#d1495b",
+    accent="#e04000",
+    text="#e6e6e6",
+    muted="#9a9a9a",
+    track="#0d0d0d",
+    ok="#8a8a8a",
+    warn="#e04000",
+    alert="#8a1a1a",
+)
+
 THEMES: Mapping[str, Theme] = MappingProxyType(
     {
         "default": DEFAULT_THEME,
         "dracula": DRACULA_THEME,
         "gruvbox": GRUVBOX_THEME,
+        "monochrome": MONOCHROME_THEME,
+        "radeon": RADECAL_THEME,
     }
 )
 
