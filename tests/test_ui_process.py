@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.text import Text
 from textual.pilot import Pilot
 from textual.widgets._data_table import RowDoesNotExist
-from rich.text import Text
 
 from gputop import control
 from gputop.config import (
