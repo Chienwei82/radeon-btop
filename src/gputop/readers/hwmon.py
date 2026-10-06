@@ -29,6 +29,7 @@ LABEL_MAP: tuple[tuple[str, str], ...] = tuple(
         (
             ("junction", "junction"),
             ("hotspot", "junction"),
+            ("vram", "mem"),
             ("edge", "edge"),
             ("mem", "mem"),
             ("soc", "soc"),

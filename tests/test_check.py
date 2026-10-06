@@ -635,6 +635,27 @@ class TestRendering:
         assert any("turned off" in line for line in lines)
         assert any("turn it on with --blocks" in line for line in lines)
 
+    def test_a_caveat_without_a_reason_still_shows_exactly_once(self) -> None:
+        """The unconditional ``extra`` line is the only place the caveat is printed.
+
+        A fallback that folded ``extra`` into the note printed it twice for a finding
+        that carried no reason of its own.
+        """
+        from gputop.check import Finding, Metric
+
+        finding = Finding(
+            Metric(
+                key="k",
+                label="Metric",
+                source="src",
+                value=None,
+                extra="turn it on with --blocks",
+            ),
+            Availability.DISABLED,
+        )
+        lines = _table([finding])
+        assert sum("turn it on with --blocks" in line for line in lines) == 1
+
     def test_json_is_shaped_for_a_consumer(self, drm_root: Path, proc_root: Path) -> None:
         bare_device(drm_root)
         device = device_for(drm_root, proc_root)

@@ -189,17 +189,20 @@ def _iso(snapshot: GpuSnapshot) -> str:
     timeline a person or a spreadsheet can read.  Recording the second at the source rather
     than reconstructing it here keeps this module free of any dependency on the sampler.
 
-    ISO 8601 with an explicit offset, which sorts lexicographically in the same order as
-    chronologically -- that is what makes a recorded session usable by anything that reads
-    the file as lines.  :meth:`datetime.isoformat` produces exactly that, so there is no
-    format string here to keep in step with it.
+    ISO 8601 in UTC, with an explicit offset, which sorts lexicographically in the same
+    order as chronologically -- that is what makes a recorded session usable by anything
+    that reads the file as lines.  Local time was tried first and is wrong for this: a
+    session crossing a DST change repeats or skips local wall times, so a line-sort no
+    longer matches the order the samples were taken in.  ``+00:00`` is explicit, so a
+    reader in any timezone can convert.  :meth:`datetime.isoformat` produces exactly
+    this format, so there is no format string here to keep in step with it.
     """
     from datetime import UTC, datetime
 
     if snapshot.wall_clock_ns <= 0:
         return ""
     moment = datetime.fromtimestamp(snapshot.wall_clock_ns / 1e9, tz=UTC)
-    return moment.astimezone().isoformat(timespec="milliseconds")
+    return moment.isoformat(timespec="milliseconds")
 
 
 def _describe(metrics: AmdgpuMetrics, domain: str) -> str:
@@ -264,6 +267,21 @@ class SessionLog:
             self.problem = problem
             self._broken = detail
 
+    def _write_failures(self) -> tuple[type[BaseException], ...]:
+        """What a write or a close can fail with on this target.
+
+        ``compression.zstd.ZstdError`` joins the usual I/O errors for a compressed
+        target: it is *not* an ``OSError``, so without it a zstd-level failure escaped
+        the "one warning and then silence" contract and propagated into the caller -- or
+        out of :meth:`close` during shutdown.  The import stays local, like every zstd
+        import in this module, so a Python built without zstd still records plain files.
+        """
+        if not self.compressed:
+            return (OSError, ValueError, TypeError)
+        from compression.zstd import ZstdError
+
+        return (OSError, ValueError, TypeError, ZstdError)
+
     def write(self, snapshot: GpuSnapshot) -> bool:
         """Append one snapshot.
 
@@ -282,6 +300,7 @@ class SessionLog:
         """
         if not self.is_open:
             return False
+        failures = self._write_failures()
         try:
             for metrics in snapshot.devices:
                 if self.format is LogFormat.CSV:
@@ -289,7 +308,7 @@ class SessionLog:
                 else:
                     self._write_jsonl(snapshot, metrics)
                 self._records += 1
-        except (OSError, ValueError, TypeError) as exc:
+        except failures as exc:
             self._fail(LogProblem.UNWRITABLE, str(exc))
             return False
         return True
@@ -312,12 +331,14 @@ class SessionLog:
 
     def close(self) -> None:
         """Finish the stream, writing the compression frame's epilogue."""
+        failures = self._write_failures()
         for stream in (self._text, self._stream, self._binary):
             if stream is not None:
                 # Closing a zstd stream whose underlying file already failed still attempts
                 # to write a frame epilogue; there is nothing useful to do about the
-                # resulting exception, and the data is already lost either way.
-                with contextlib.suppress(OSError, ValueError):
+                # resulting exception -- OSError, ValueError, or zstd's own ZstdError --
+                # and the data is already lost either way.
+                with contextlib.suppress(*failures):
                     stream.close()
         self._text = None
         self._stream = None

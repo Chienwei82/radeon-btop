@@ -125,7 +125,10 @@ class KillConfirm(_Modal[str | None]):
         process = self._process
         with Vertical(classes="modal-box"):
             yield Static(f"Send a signal to pid {process.pid}?", classes="modal-title")
-            yield Static(self._body(), id="kill-body", classes="modal-body")
+            # markup off: the body carries ``process.user`` and ``process.command`` from
+            # /proc, and a command line containing ``[/]`` raised MarkupError here -- at
+            # exactly the moment the user confirmed a signal.
+            yield Static(self._body(), id="kill-body", classes="modal-body", markup=False)
             # Plain Statics rather than a row container: a ``Horizontal`` fills the
             # height it is given, which pushed the key hints off the bottom of a dialog
             # that had already wrapped onto two lines.

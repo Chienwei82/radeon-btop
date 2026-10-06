@@ -1331,15 +1331,25 @@ class GpuTopApp(App[None]):
         self._move_selection(-1)
 
     def _move_selection(self, step: int) -> None:
-        """Move the table cursor and focus the table so the arrows keep working."""
-        panel = self.query_one(ProcessTable)
-        if not panel.display:
+        """Move the table cursor and focus the table so the arrows keep working.
+
+        The guard is on ``#process-panel``, the *wrapper* the responsive layout hides,
+        not on the table inside it: the table's own ``display`` is never touched, so
+        checking it made this guard dead code and the arrows kept moving a selection
+        nobody could see.
+        """
+        if not self.query_one("#process-panel").display:
             return
+        panel = self.query_one(ProcessTable)
         panel.step_cursor(step)
         panel.focus()
 
     def action_kill_selected(self) -> None:
         """Ask before sending a signal to the selected process."""
+        # Same guard as the arrows: a panel the user cannot see is a selection they
+        # cannot check, and signalling it is not something to do blind.
+        if not self.query_one("#process-panel").display:
+            return
         panel = self.query_one(ProcessTable)
         process = panel.selected
         if not self._config.process.allow_kill:

@@ -150,13 +150,20 @@ class GpuProcess:
         return (self.vram_used or 0) + (self.gtt_used or 0) + (self.cpu_used or 0)
 
     def engine_percent_for(self, bucket: str) -> Percent | None:
-        """Utilisation for a normalised engine bucket, or ``None`` when unseen."""
+        """Utilisation for a normalised engine bucket, or ``None`` when unseen.
+
+        Several raw engines land in one bucket -- ``sdma0`` and ``sdma1`` are both
+        ``dma`` -- and a client using both is using both, so the bucket sums them the
+        way :attr:`engine_percent` sums every engine.  Taking the maximum instead
+        under-reported the column against the total the rows are ordered by: two SDMA
+        engines at 30% + 20% read as 30% here and 50% there.
+        """
         values = [
             u.percent for u in self.engines if u.engine == bucket and u.percent is not None
         ]
         if not values:
             return None
-        return max(values)
+        return min(100.0, sum(values))
 
     def bucket_percent(self, *buckets: str) -> Percent | None:
         """Summed utilisation across several buckets, or ``None`` when none are known.

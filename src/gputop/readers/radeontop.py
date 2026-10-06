@@ -546,10 +546,13 @@ class RadeontopSource:
         method's read of ``_process`` and its final write, and the result is a radeontop
         nobody terminates, still holding the card, with its pipes leaked.  The handle is
         cleared *inside* the lock, so a concurrent :meth:`start` sees a free slot rather
-        than a process this method believes it owns.
+        than a process this method believes it owns -- and the flag is set inside the lock
+        for the same reason.  Set outside it, a :meth:`start` already in flight can spawn
+        a child and *clear* the flag after this method set it, leaving a source that was
+        stopped and now looks freshly started, dead for good and reporting ``ok``.
         """
-        self._stop.set()
         with self._lock:
+            self._stop.set()
             process = self._process
             threads = tuple(self._threads)
             self._process = None

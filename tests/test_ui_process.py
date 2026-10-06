@@ -7,6 +7,7 @@ survives a restart.
 """
 
 import asyncio
+import shutil
 import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -775,7 +776,7 @@ class TestMultipleGpus:
 
         text = capture(app, body)
         assert "AMD Radeon RX 6800" in text
-        assert "AMD Radeon Graphics (Renoir)" in text
+        assert "AMD Radeon Graphics (Raphael)" in text
 
     def test_tab_moves_to_the_next_gpu(self, drm_root: Path, proc_root: Path) -> None:
         app = make_app(drm_root, proc_root, build=build_two_gpus)
@@ -874,7 +875,7 @@ class TestMultipleGpus:
 
         text = capture(app, body)
         assert "RX 6800" in text
-        assert "Renoir" in text
+        assert "Raphael" in text
         assert "focused" in text
 
     def test_the_overview_hides_the_detail_panels(
@@ -1589,3 +1590,185 @@ class TestMiscellaneous:
 
         before, after = capture(app, body, size=(140, 44))
         assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Process text is data, never Rich markup
+# ---------------------------------------------------------------------------
+
+
+class TestProcessTextIsNotMarkup:
+    """``DataTable`` parses ``str`` cells as markup; ``/proc`` text is not markup.
+
+    A command line containing ``[/]`` raised ``MarkupError`` and killed the redraw of
+    the whole table, and one containing ``[red]`` was silently styled and mangled.  The
+    kill dialog had the same problem at the moment the user confirmed a signal.
+    """
+
+    def test_a_command_line_containing_markup_renders_verbatim(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        build_dgpu(drm_root)
+        make_process(
+            proc_root,
+            5150,
+            name="mapper",
+            cmdline=["mapper", "[/]", "[red]"],
+            fdinfo=["drm-resident-vram: 1048576 B"],
+        )
+        app = make_app(drm_root, proc_root, build=lambda _d, _p: None)
+
+        async def body(pilot: Pilot[Any]) -> str:
+            await press(pilot, "c")
+            return screen(app)
+
+        text = capture(app, body)
+        assert "[/]" in text
+        assert "[red]" in text
+
+    def test_the_kill_dialog_does_the_same(self, drm_root: Path, proc_root: Path) -> None:
+        build_dgpu(drm_root)
+        make_process(
+            proc_root,
+            5150,
+            name="mapper",
+            cmdline=["/usr/bin/mapper", "--map", "[/]"],
+            fdinfo=["drm-resident-vram: 1048576 B"],
+        )
+        app = make_app(drm_root, proc_root, build=lambda _d, _p: None, allow_kill=True)
+
+        async def body(pilot: Pilot[Any]) -> str:
+            await press(pilot, "k")
+            await pilot.pause()
+            return screen(app)
+
+        text = capture(app, body)
+        assert "[/]" in text
+        assert "SIGTERM" in text
+
+
+# ---------------------------------------------------------------------------
+# The selection's lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestSelectionLifecycle:
+    """A selection follows the process, and stops when the process does."""
+
+    def test_a_selection_that_exits_stops_being_selected(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """The selection does not silently transfer to whichever row inherited the cursor.
+
+        A kill dialog aimed at "the selected process" would otherwise aim at whatever
+        happened to sort first after the target exited -- naming one process and
+        signalling another.
+        """
+        app = make_app(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> bool:
+            select(app, 4242)
+            assert table_of(app).selected is not None
+            shutil.rmtree(proc_root / "4242")
+            await wait_until(
+                lambda: app._last_snapshot is not None
+                and all(p.pid != 4242 for p in app._last_snapshot.processes),
+                what="a sample without the exited process",
+            )
+            await wait_until(
+                lambda: table_of(app).selected is None,
+                what="the selection to stop rather than move",
+            )
+            return True
+
+        assert capture(app, body) is True
+
+    def test_the_user_can_select_again_afterwards(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """The empty selection lasts until the user picks a row, not a sample."""
+        app = make_app(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> int | None:
+            select(app, 4242)
+            shutil.rmtree(proc_root / "4242")
+            await wait_until(
+                lambda: table_of(app).selected is None,
+                what="the selection to stop",
+            )
+            await press(pilot, "down")
+            chosen = table_of(app).selected
+            return chosen.pid if chosen is not None else None
+
+        pid = capture(app, body)
+        assert pid is not None
+        assert pid != 4242
+
+
+# ---------------------------------------------------------------------------
+# Heading clicks and hidden panels
+# ---------------------------------------------------------------------------
+
+
+class TestHeadingClicks:
+    """A click on a column heading sorts by that column.
+
+    ``StringKey`` has no ``__str__``, so comparing ``str(column_key)`` against a column
+    name compared an object repr and matched nothing: heading clicks were silently
+    ignored.
+    """
+
+    def test_clicking_a_heading_sorts_by_that_column(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        app = make_app(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> str:
+            # y=0 inside the grid is the heading row; x=2 is inside the first column.
+            await pilot.click("#process-table", offset=(2, 0))
+            await wait_until(
+                lambda: app._sort.column == "pid", what="the heading click to sort"
+            )
+            return app._sort.column
+
+        assert capture(app, body) == "pid"
+
+
+class TestHiddenPanelKeys:
+    """Keys aimed at the process panel are inert while the panel is hidden.
+
+    The responsive layout hides ``#process-panel`` on a short terminal.  The guard used
+    to check the table *inside* it, which is never hidden, so the arrows kept moving a
+    selection nobody could see and ``k`` could still signal it.
+    """
+
+    def _make(self, drm_root: Path, proc_root: Path) -> GpuTopApp:
+        return make_app(drm_root, proc_root, allow_kill=True)
+
+    def test_the_arrows_do_not_move_a_hidden_selection(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        app = self._make(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> tuple[int, int]:
+            await pilot.resize_terminal(60, 18)
+            await pilot.pause()
+            assert not app.query_one("#process-panel").display
+            before = table_of(app).cursor_row
+            await press(pilot, "down")
+            return before, table_of(app).cursor_row
+
+        before, after = capture(app, body, size=(60, 18))
+        assert before == after == 0
+
+    def test_k_does_not_signal_a_hidden_selection(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        app = self._make(drm_root, proc_root)
+
+        async def body(pilot: Pilot[Any]) -> bool:
+            await press(pilot, "k")
+            await pilot.pause()
+            return app._transient_notice is None
+
+        assert capture(app, body, size=(60, 18)) is True

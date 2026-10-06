@@ -264,8 +264,9 @@ class ProcessRow:
     Attributes:
         process: The client this row shows.
         depth: Tree depth; 0 for a root.
-        has_children: Whether the row has nested clients, which decides whether its own
-            guide line continues downwards.
+        has_children: Whether the row has nested clients.  Purely descriptive: the
+            connector comes from :attr:`is_last`, and the children's guides from their
+            parent's ``last``.
         is_last: Whether the row is the final entry of its group, which decides whether
             its own connector is ``└`` or ``├``.
         guides: One flag per ancestor level: ``True`` means an ancestor still has
@@ -432,7 +433,12 @@ def tree_rows(
                     process=member,
                     depth=depth,
                     has_children=bool(kids),
-                    is_last=last and index == len(members) - 1 and not kids,
+                    # The final entry of the group draws the elbow whether or not the
+                    # group has children below it.  An earlier ``and not kids`` here made
+                    # every parent draw a tee even as the last sibling -- over a guide
+                    # column that was empty beneath it, because the children's guides
+                    # derive from ``last``, not from this.
+                    is_last=last and index == len(members) - 1,
                     guides=guides,
                 )
             )
@@ -485,14 +491,26 @@ def busiest_processes(
     the answer, and highlighting one arbitrarily would misreport what the GPU is doing.
     An idle table highlights nothing, because "the busiest process" is then a statement
     about nothing at all.
+
+    Ranked by magnitude, not by table position: ``sort`` selects the *column*, and its
+    direction is deliberately ignored.  Taking the first sorted row marked the *least*
+    busy client whenever the user reversed the sort, and claiming that row was the top
+    consumer of the GPU.  A non-measurement column -- ``pid``, ``user``, ``command`` --
+    has no "most" to find and yields nothing; see :data:`NUMERIC_SORT_COLUMNS`.
     """
-    if not processes:
+    if not processes or sort.column not in NUMERIC_SORT_COLUMNS:
         return ()
-    ranked = sort_processes(processes, sort)
-    best = column_value(ranked[0], sort.column)
-    if not isinstance(best, (int, float)) or best <= 0:
+    values = [
+        value
+        for process in processes
+        if isinstance(value := column_value(process, sort.column), (int, float))
+    ]
+    if not values:
         return ()
-    return tuple(process for process in ranked if column_value(process, sort.column) == best)
+    best = max(values)
+    if best <= 0:
+        return ()
+    return tuple(process for process in processes if column_value(process, sort.column) == best)
 
 
 def cell_value(process: GpuProcess, column: SortColumn, *, full_command: bool = False) -> str:

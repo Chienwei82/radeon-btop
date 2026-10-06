@@ -12,7 +12,7 @@ import csv
 import io
 import json
 from compression import zstd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -376,6 +376,20 @@ class TestCsvWriting:
         cells = dict(zip(CSV_COLUMNS, read_rows(path)[1], strict=True))
         stamp = datetime.fromisoformat(cells["time"])
         assert stamp.year == 2023
+
+    def test_the_time_column_is_utc_so_lines_stay_in_order(self, tmp_path: Path) -> None:
+        """Local time repeats an hour when DST falls back, un-sorting the file.
+
+        The module promises that lines sort chronologically; only a fixed offset
+        delivers that in every timezone and across a DST change.
+        """
+        path = tmp_path / "utc.csv"
+        with open_log_context(path) as log:
+            log.write(make_snapshot(make_metrics()))
+        cells = dict(zip(CSV_COLUMNS, read_rows(path)[1], strict=True))
+        stamp = datetime.fromisoformat(cells["time"])
+        assert stamp.utcoffset() == timedelta(0)
+        assert stamp.isoformat().endswith("+00:00")
 
     def test_a_missing_wall_clock_leaves_an_empty_cell(self, tmp_path: Path) -> None:
         """Not guessing a time is better than writing a plausible wrong one."""

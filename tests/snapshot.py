@@ -156,9 +156,13 @@ def screen_lines(app: App[object], width: int = CAPTURE_WIDTH) -> list[str]:
     Args:
         app: A running app.
         width: Columns to render at.
+
+    The strip text is taken *literally*.  It used to be re-rendered through
+    ``Console.render_str``, which parses Rich markup: a screen showing a process whose
+    command contained ``[/]`` raised ``MarkupError`` here -- in the test helper, not in
+    the app -- and any test about markup-like text could not even capture the screen.
     """
-    console = Console(width=width, no_color=True, legacy_windows=False, force_terminal=False)
     lines: list[str] = []
     for strip in app.screen._compositor.render_strips():
-        lines.append(console.render_str(strip.text).plain.rstrip())
+        lines.append(strip.text.rstrip())
     return lines

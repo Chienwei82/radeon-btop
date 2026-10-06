@@ -167,8 +167,10 @@ def test_non_drm_descriptors_are_ignored(proc_root: Path) -> None:
 
     assert processes == ()
     assert total == 1
-    # The process was counted but not a GPU client, so it is not "visible" as one.
-    assert visible == 0
+    # Inspectable, so it counts as *visible*.  ``visible`` is about /proc permissions,
+    # not about holding a GPU descriptor: the two counts differing is what reveals that
+    # other users' processes are hidden, and a plain daemon is not hidden from anyone.
+    assert visible == 1
 
 
 def test_duplicate_client_ids_are_merged_not_summed(proc_root: Path) -> None:

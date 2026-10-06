@@ -380,14 +380,12 @@ def _table(findings: Sequence[Finding]) -> list[str]:
         note = str(reason) if reason is not None else ""
         if finding.detail:
             note = f"{note}: {finding.detail}" if note else finding.detail
-        if not note and metric.extra:
-            note = metric.extra
         if note:
             lines.append(f"{'':<{key_width}}  {'':<{state_width}}  -> {note}")
         # ``extra`` is appended as its own line rather than folded into ``note``.  It is the
         # standing caveat that says what to *do* ("add --blocks", "APUs have no fan"), and
-        # every finding that carries one also has a reason -- so a note that is only shown
-        # when there is nothing else to say rendered none of them.
+        # every finding that carries one also has a reason.  It is printed unconditionally
+        # and nowhere else, so it shows exactly once whether or not there is a reason.
         if metric.extra:
             lines.append(f"{'':<{key_width}}  {'':<{state_width}}  -> {metric.extra}")
         if metric.remedy:

@@ -251,7 +251,9 @@ class ProcessCollector:
             number of process directories seen and ``visible_count`` the number whose
             file descriptors could actually be inspected.  The two differing is what
             reveals that ``/proc`` permissions hid other users' processes, which the UI
-            reports rather than hiding.
+            reports rather than hiding.  ``visible_count`` counts *inspectable* processes,
+            not ones that happen to hold a DRM descriptor: a plain process is perfectly
+            visible and must not be reported as hidden.
         """
         clients, total_count, visible_count = self._scan_clients()
         processes = self._build_processes(clients, now_ns)
@@ -278,27 +280,32 @@ class ProcessCollector:
                 continue
             total_count += 1
             pid = int(name)
-            try:
-                records = read_pid(entry.path)
-            except OSError:
-                # The process exited between scandir and the read -- and, for another
-                # user's, could not be opened at all.  Both mean "no record from here",
-                # and neither counts as visible.  A separate PermissionError clause used
-                # to sit below this one, unreachable because PermissionError is a
-                # subclass of OSError; its comment described behaviour the handler above
-                # already provided.
+            records = read_pid(entry.path)
+            if records is None:
+                # Could not inspect this process at all: another user's descriptor
+                # directory, or the process exited between the scan and the read.  This
+                # is the case ``visible_count`` exists to count.  (``_read_pid`` swallows
+                # its own OSError/ValueError, so there is nothing to catch here.)
                 continue
+            visible_count += 1
             if records:
-                visible_count += 1
                 merge(clients, pid, entry.path, records)
 
         return clients, total_count, visible_count
 
-    def _read_pid(self, pid_dir: str) -> list[FdinfoRecord]:
+    def _read_pid(self, pid_dir: str) -> list[FdinfoRecord] | None:
         """Return every DRM fdinfo record held by one process.
 
         Args:
             pid_dir: The process directory as a string path, already known to exist.
+
+        Returns:
+            The records -- empty for a process holding no DRM descriptor -- or ``None``
+            when the process could not be inspected at all: its descriptor directory is
+            unreadable, which is the ordinary state of another user's process without
+            root.  The distinction is what ``visible_count`` is made of; a bare ``[]``
+            for both would make "has no GPU descriptor" and "hidden by permissions"
+            indistinguishable.
 
         The descriptor's *target* is what identifies a GPU client, so every open
         descriptor costs one ``readlink``.  The previous implementation also listed the
@@ -309,7 +316,7 @@ class ProcessCollector:
         try:
             fd_entries = list(os.scandir(pid_dir + "/fd"))
         except OSError, ValueError:
-            return []
+            return None
 
         records: list[FdinfoRecord] = []
         fdinfo_dir = pid_dir + "/fdinfo/"

@@ -178,23 +178,30 @@ class Sampler:
         self._thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
-        """Signal the thread to finish and wait for it."""
+        """Signal the thread to finish and wait for it.
+
+        The radeontop children are torn down even when the join times out.  They run with
+        ``-l 0`` -- until terminated -- and would otherwise outlive the monitor that
+        started them; their handles are lock-protected against a tick still in flight, so
+        a wedged tick is no reason to leave them holding the card.
+        """
         self._stop.set()
         self._resync.set()
         thread = self._thread
         if thread is not None:
             thread.join(timeout)
-        if thread is not None and thread.is_alive():
+        if thread is None or not thread.is_alive():
+            self._thread = None
+        else:
             # The join timed out -- a tick was still inside /proc or a radeontop pipe.
             # The handle is deliberately *kept*: clearing it would let a later start()
             # spawn a second tick thread beside this one, and start() clears _stop, so the
             # orphan would never see the stop and would run for the life of the process,
             # two threads racing on the sequence counter, the history and the collector
-            # baseline.  Leaving the handle set makes start() refuse instead.
-            return
-        self._thread = None
-        # Stopped after the sampling thread, not before: the pool is polled from inside a
-        # tick, so tearing it down while a tick is in flight would race the child handles.
+            # baseline.  Left in place, start() silently no-ops until the orphan dies --
+            # it does not refuse loudly -- and the orphan's own ``finally`` finishes the
+            # teardown whenever it unwedges.
+            pass
         self._blocks.stop()
 
     def set_interval(self, interval_s: float) -> float:
@@ -313,8 +320,15 @@ class Sampler:
         delta baseline, all of which the design above gives to a single owner; running two
         concurrently computes engine deltas against the wrong baseline and loses a tick from
         the statistics.  :meth:`request_tick` is the way to ask a *running* sampler for a
-        sample now.
+        sample now.  The invariant is enforced rather than documented: this raised before,
+        silently, in the form of a corrupt baseline.
         """
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            raise RuntimeError(
+                "sample_once() runs a whole tick and must not race the sampling thread; "
+                "use request_tick() to ask a running sampler for a sample"
+            )
         snapshot = self._tick()
         self._queue.put(snapshot)
         return snapshot
@@ -399,22 +413,42 @@ class Sampler:
         """
         period = self._interval_s
         next_deadline = time.monotonic()
-        while not self._stop.is_set():
-            # Armed before the tick, so a change made during the tick is not lost between
-            # here and the wait.  A change made before this line is picked up by the read
-            # below anyway, so there is no window in which it is dropped entirely.
-            self._resync.clear()
-            current = self._interval_s
-            if current != period:
-                period = current
-                next_deadline = time.monotonic()
-            try:
-                self._queue.put(self._tick())
-            except Exception:
-                self._stats = _with_tick_error(self._stats)
-            next_deadline += period
-            delay = next_deadline - time.monotonic()
-            self._resync.wait(min(max(delay, 0.0), period))
+        try:
+            while not self._stop.is_set():
+                # Armed before the tick, so a change made during the tick is not lost between
+                # here and the wait.  A change made before this line is picked up by the read
+                # below anyway, so there is no window in which it is dropped entirely.
+                self._resync.clear()
+                current = self._interval_s
+                if current != period:
+                    period = current
+                    next_deadline = time.monotonic()
+                try:
+                    self._queue.put(self._tick())
+                except Exception:
+                    self._stats = _with_tick_error(self._stats)
+                next_deadline += period
+                now = time.monotonic()
+                if next_deadline < now:
+                    # The tick overran its slot -- a wedged /proc read, a slow child.  The
+                    # missed slots are dropped, not replayed: waiting out a negative delay
+                    # would run the next ticks back to back until the stale deadline grid
+                    # caught up with the wall clock, a full /proc scan per missed period,
+                    # which is the disk thrash the clamp below exists to prevent.  The
+                    # grid's *phase* is kept, so the tick rate does not drift.
+                    skipped = (now - next_deadline) // period + 1
+                    next_deadline += skipped * period
+                    now = time.monotonic()
+                delay = next_deadline - now
+                self._resync.wait(min(max(delay, 0.0), period))
+        finally:
+            # The tick thread owns the pool teardown: it is the only poller, and this runs
+            # after its last tick -- including one that unwedged long after ``stop`` gave
+            # up waiting -- so a poll that raced the shutdown and revived a radeontop
+            # child cannot leave it running.  ``stop`` tears the pool down too, for the
+            # callers (``--dump``, the tests) that never start this thread; pool teardown
+            # is idempotent.
+            self._blocks.stop()
 
     def _tick(self) -> GpuSnapshot:
         """Perform one sample and return the immutable result."""

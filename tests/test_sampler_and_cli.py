@@ -57,11 +57,46 @@ class TestModel:
         assert not Fan(rpm=1200, max_rpm=3000).stopped
 
     def test_pcie_generation(self) -> None:
-        assert PcieLink(width=16, speed=80).generation == 5
-        assert PcieLink(width=16, speed=80).describe() == "Gen5 x16"
+        """``pcie_link_speed`` is 0.1 GT/s, so 80 is 8.0 GT/s -- Gen3, not Gen5.
+
+        ``kgd_pp_interface.h`` documents the field as "in 0.1 GT/s" in every
+        ``gpu_metrics`` revision.  Treating it as a 16x-multiple of the generation
+        reports a Gen3 link as Gen5, which is what the reference Navi 21 did.
+        """
+        link = PcieLink(width=16, speed=80)
+        assert link.gt_per_second == 8.0
+        assert link.generation == 3
+        assert link.describe() == "Gen3 x16"
+
+    def test_pcie_generation_table(self) -> None:
+        assert [
+            (
+                PcieLink(width=16, speed=rate).generation,
+                PcieLink(width=16, speed=rate).describe(),
+            )
+            for rate in (25, 50, 80, 160, 320, 640)
+        ] == [
+            (1, "Gen1 x16"),
+            (2, "Gen2 x16"),
+            (3, "Gen3 x16"),
+            (4, "Gen4 x16"),
+            (5, "Gen5 x16"),
+            (6, "Gen6 x16"),
+        ]
 
     def test_pcie_without_a_generation(self) -> None:
-        assert PcieLink(width=4, speed=2).describe() == "x4"
+        """A rate matching no generation is shown as the speed it is.
+
+        Snapping it to the closest one would be a claim about the hardware, and this
+        figure exists to report what the link is actually doing.
+        """
+        link = PcieLink(width=4, speed=90)
+        assert link.gt_per_second == 9.0
+        assert link.generation == 0
+        assert link.describe() == "9 GT/s x4"
+
+    def test_pcie_unmeasured(self) -> None:
+        assert PcieLink(width=16, speed=0).generation == 0
 
 
 class TestEngineUsage:
@@ -121,6 +156,23 @@ class TestEngineUsage:
         )
         assert process.engine_percent_for("gfx") == 25.0
         assert process.engine_percent_for("enc") is None
+
+    def test_a_bucket_sums_the_engines_that_make_it_up(self) -> None:
+        """``sdma0`` and ``sdma1`` are both ``dma``, and a client using both uses both.
+
+        The bucket used to report the busier engine instead of the sum, so its column
+        no longer added up to the total the rows are ordered by.
+        """
+        process = GpuProcess(
+            pid=1,
+            name="x",
+            user="u",
+            bdf="b",
+            client_id=1,
+            engines=(EngineUsage("dma", 300, 300, 1000), EngineUsage("dma", 200, 200, 1000)),
+        )
+        assert process.engine_percent_for("dma") == 50.0
+        assert process.engine_percent == 50.0
 
 
 class TestRingBuffer:
@@ -968,6 +1020,32 @@ class TestCli:
             "source": "gpu_metrics",
         }
         assert device["gpu_busy_percent"] == 12.0
+
+    def test_dump_reports_the_link_rate_not_a_generation(
+        self, drm_root: Path, proc_root: Path
+    ) -> None:
+        """``speed`` is the kernel's 0.1 GT/s unit, so the decoded rate has to travel with it.
+
+        ``--dump`` consumers get ``speed: 80`` verbatim; without ``gt_per_second`` in the
+        payload the only way to read it is to guess, and guessing 16x-per-generation is
+        what turned a Gen3 link into a reported Gen5.
+        """
+        self._drm, self._proc = drm_root, proc_root
+        make_gpu(
+            drm_root,
+            bdf="0000:0c:00.0",
+            metrics={"pcie_link_width": 16, "pcie_link_speed": 80},
+        )
+
+        payload = self._run(["--dump", "--interval", "0.05", "--no-processes"])
+
+        assert payload["devices"][0]["pcie"] == {
+            "width": 16,
+            "speed": 80,
+            "gt_per_second": 8.0,
+            "generation": 3,
+            "describe": "Gen3 x16",
+        }
 
     def test_dump_without_a_device_reports_and_exits_nonzero(
         self, drm_root: Path, proc_root: Path

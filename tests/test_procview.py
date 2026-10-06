@@ -569,6 +569,16 @@ class TestTree:
         assert rows[1].prefix == "├─ "
         assert rows[2].prefix == "└─ "
 
+    def test_the_last_sibling_with_children_still_draws_an_elbow(self) -> None:
+        """A chain: the middle node is both the last of its siblings and a parent.
+
+        Its children draw a gap guide below it, so a tee would stand over nothing;
+        the connector has to be the elbow.
+        """
+        clients = [proc(100), proc(200, ppid=100), proc(300, ppid=200)]
+        rows = tree_rows(clients, SortState(column="pid", reverse=False))
+        assert [row.prefix for row in rows] == ["", "└─ ", "   └─ "]
+
     def test_a_grandchild_continues_the_vertical_guide(self) -> None:
         """The guide is drawn because its parent is not the last of its own siblings."""
         clients = [
@@ -750,6 +760,27 @@ class TestBusiest:
     def test_a_memory_only_leader_is_not_busy(self) -> None:
         """Holding memory is not using the engine, and the marker means "using"."""
         assert busiest_processes([proc(1, vram=1024 * MiB)]) == ()
+
+    def test_reversing_the_sort_still_marks_the_busiest(self) -> None:
+        """The leader is a statement about magnitude, not about which row sorted first.
+
+        Ranking by position marked the *least* busy client once the user reversed the
+        sort, and the title then called it the top consumer of the GPU.
+        """
+        clients = [
+            proc(1, engines=engines(engine("gfx", 80.0))),
+            proc(2, engines=engines(engine("gfx", 5.0))),
+        ]
+        ascending = SortState(column="total", reverse=False)
+        assert pids(busiest_processes(clients, sort=ascending)) == [1]
+
+    def test_an_identifier_column_has_no_leader(self) -> None:
+        """``pid`` orders rows but measures nothing, so there is no "top" to mark."""
+        clients = [
+            proc(1, engines=engines(engine("gfx", 80.0))),
+            proc(2, engines=engines(engine("gfx", 5.0))),
+        ]
+        assert busiest_processes(clients, sort=SortState(column="pid")) == ()
 
 
 # ---------------------------------------------------------------------------

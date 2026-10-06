@@ -27,13 +27,20 @@ DEVICE_NAMES: dict[int, str] = {
     # specific SKU.  An earlier revision of this table claimed Navi 44 (RDNA3) for this
     # id, which was simply wrong -- the id does not identify the silicon generation.
     0x73BF: "AMD Radeon RX 6800",
-    # Vega / GFX9 (consumer Vega and Frontier Edition).
-    0x6860: "AMD Radeon RX Vega 64",
-    0x6861: "AMD Radeon RX Vega 56",
-    0x687F: "AMD Radeon Vega Frontier Edition",
-    # Renoir / Cezanne APUs (Zen 2 / Zen 3).
+    # Vega 10 / GFX9, checked against pci.ids (the same source lspci reads).  These ids
+    # name die families and board configurations rather than one SKU, so the names say
+    # that.  An earlier revision of this table got four of them wrong -- it paired the
+    # ids with the marketing names of *other* boards (0x6860 is the Instinct MI25 family,
+    # not an RX Vega 64; 0x687F is the RX Vega 56/64, not the Frontier Edition, which is
+    # 0x6863) -- which is exactly the confidently-wrong output this table exists to avoid.
+    0x6860: "AMD Vega 10 [Instinct MI25/MI25x2/V340/V320]",
+    0x6861: "AMD Radeon PRO WX 9100",
+    0x6863: "AMD Radeon Vega Frontier Edition",
+    0x687F: "AMD Radeon RX Vega 56/64",
+    # APU iGPUs (Zen 3 / Zen 4), also checked against pci.ids.  0x164E is Raphael
+    # (Radeon 610M), not Renoir -- Renoir is 0x1636.
     0x1638: "AMD Radeon Graphics (Cezanne)",
-    0x164E: "AMD Radeon Graphics (Renoir)",
+    0x164E: "AMD Radeon Graphics (Raphael)",
 }
 
 #: Coarse device ids that are known to be integrated GPUs (APUs).
