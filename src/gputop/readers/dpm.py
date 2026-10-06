@@ -23,6 +23,11 @@ from gputop.readers.fsutil import PROFILE_ROW, TABLE_LIMIT, parse_first_int, rea
 # than skipping one line of it.
 _DPM_ROW = re.compile(r"^(\S+):\s*(\d+)\s*([KMUG]?[Hh]z)\s*(\*)?\s*$")
 
+#: ``current_link_speed`` is a human-readable string, not a number: the driver writes
+#: ``16.0 GT/s PCIe``.  Taking the first integer out of it keeps ``16`` and throws away
+#: the decimal, which turns 16.0 GT/s into 1.6 -- so the rate has to be matched whole.
+_LINK_SPEED_ROW = re.compile(r"(\d+(?:\.\d+)?)\s*GT/s")
+
 
 def parse_dpm_table(text: str | None) -> tuple[int | None, int | None]:
     """Parse a ``pp_dpm_*`` table into ``(current_mhz, max_mhz)``.
@@ -171,8 +176,32 @@ def read_power_profile(device_dir: Path) -> str | None:
     )
 
 
+def parse_link_speed(text: str | None) -> int | None:
+    """Parse a ``current_link_speed`` file into the kernel's 0.1 GT/s unit.
+
+    ``16.0 GT/s PCIe`` becomes ``160``, matching what ``gpu_metrics`` reports for the
+    same link, so both sources can drive the same :class:`PcieLink`.
+
+    Args:
+        text: Raw file contents.
+
+    Returns:
+        The rate in tenths of a GT/s, or ``None`` when the file is missing or does not
+        carry a rate.
+    """
+    if not text:
+        return None
+    match = _LINK_SPEED_ROW.search(text)
+    if match is None:
+        return None
+    return round(float(match.group(1)) * 10)
+
+
 def read_link(device_dir: Path) -> tuple[int | None, int | None]:
-    """Read the negotiated ``(width, speed)`` of the PCIe link."""
+    """Read the negotiated ``(width, speed)`` of the PCIe link.
+
+    ``speed`` comes back in tenths of a GT/s, the unit :class:`PcieLink` expects.
+    """
     width = parse_first_int(read_text(device_dir / "current_link_width"))
-    speed = parse_first_int(read_text(device_dir / "current_link_speed"))
+    speed = parse_link_speed(read_text(device_dir / "current_link_speed"))
     return width, speed

@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from gputop.model.metrics import PcieLink
 from gputop.readers.dpm import (
     parse_dpm_table,
+    parse_link_speed,
     parse_power_profile,
     read_clock,
     read_clock_max,
@@ -324,9 +326,34 @@ class TestDpm:
         assert parse_power_profile(None) is None
 
     def test_pcie_link(self, tmp_path: Path) -> None:
+        """``current_link_speed`` is a string, not an integer.
+
+        The driver writes ``16.0 GT/s PCIe``.  Reading the first integer out of that
+        keeps ``16`` and drops the decimal, so the rate has to be matched whole and
+        scaled into the 0.1 GT/s unit ``gpu_metrics`` uses.
+        """
         write(tmp_path / "current_link_width", "16\n")
-        write(tmp_path / "current_link_speed", "32\n")
-        assert read_link(tmp_path) == (16, 32)
+        write(tmp_path / "current_link_speed", "16.0 GT/s PCIe\n")
+        assert read_link(tmp_path) == (16, 160)
+        assert PcieLink(width=16, speed=160).describe() == "Gen4 x16"
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("16.0 GT/s PCIe\n", 160),
+            ("8.0 GT/s PCIe\n", 80),
+            ("2.5 GT/s PCIe\n", 25),
+            ("32.0 GT/s PCIe\n", 320),
+            ("16.0 GT/s\n", 160),
+        ],
+    )
+    def test_parse_link_speed(self, text: str, expected: int) -> None:
+        assert parse_link_speed(text) == expected
+
+    def test_parse_link_speed_absent(self) -> None:
+        assert parse_link_speed(None) is None
+        assert parse_link_speed("") is None
+        assert parse_link_speed("16\n") is None
 
 
 class TestThrottle:

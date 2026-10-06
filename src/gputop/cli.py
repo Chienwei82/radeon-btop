@@ -285,6 +285,10 @@ def _device_to_dict(metrics: AmdgpuMetrics) -> dict[str, Any]:
             else {
                 "width": metrics.pcie.width,
                 "speed": metrics.pcie.speed,
+                # ``speed`` is the kernel's own unit, tenths of a GT/s.  A consumer that
+                # reads it as a generation -- or as GT/s -- is off by a factor, so the
+                # decoded rate is carried alongside it.
+                "gt_per_second": metrics.pcie.gt_per_second,
                 "generation": metrics.pcie.generation,
                 "describe": metrics.pcie.describe(),
             }

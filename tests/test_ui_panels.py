@@ -288,7 +288,7 @@ class TestSensorsPanel:
 
     def test_pcie_and_profile(self) -> None:
         text = "\n".join(plain(r) for r in sensors_panel(self.full(), DEFAULT_THEME, 50))
-        assert "Gen5 x16" in text
+        assert "Gen3 x16" in text
         assert "BOOTUP_DEFAULT" in text
 
     def test_quiet_throttle(self) -> None:

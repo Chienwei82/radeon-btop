@@ -207,7 +207,7 @@ Temperatures        ok          hwmon+gpu_metrics           edge 74 C, junction 
 Power draw          ok          hwmon+gpu_metrics           152 W (cap 211 W)
 Fan                 ok          hwmon+gpu_metrics           797 RPM, 29 % duty
 Throttle status     ok          gpu_metrics                 idle
-PCIe link           ok          gpu_metrics+current_link_*  Gen5 x16
+PCIe link           ok          gpu_metrics+current_link_*  Gen3 x16
 Power profile       ok          pp_power_profile_mode       BOOTUP_DEFAULT
 Overdrive table     ok          pp_od_clk_voltage           2 clock domains
 

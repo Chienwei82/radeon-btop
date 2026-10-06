@@ -104,23 +104,65 @@ class ThrottleInfo:
         return bool(self.active)
 
 
+#: PCIe generation against its signalling rate, in the kernel's unit of 0.1 GT/s.
+#: ``kgd_pp_interface.h`` documents ``pcie_link_speed`` as "in 0.1 GT/s" in every
+#: ``gpu_metrics`` revision from v1_0 on, so 80 is 8.0 GT/s -- Gen3 -- and not an
+#: encoding of 5.  Reading the generation off the rate is what keeps a Gen3 card
+#: from being reported as Gen5; reading it off an assumed multiplier cannot.
+_PCIE_GENERATIONS: tuple[tuple[int, int], ...] = (
+    (25, 1),  # 2.5 GT/s
+    (50, 2),  # 5.0 GT/s
+    (80, 3),  # 8.0 GT/s
+    (160, 4),  # 16.0 GT/s
+    (320, 5),  # 32.0 GT/s
+    (640, 6),  # 64.0 GT/s
+)
+
+#: How far off a standard signalling rate the kernel may report and still be called a
+#: generation, as a fraction of that rate.  Generous enough for a driver that rounds
+#: 8.0 GT/s up, tight enough that an unrecognised rate is reported as the speed it is
+#: rather than snapped to the nearest generation.
+_PCIE_RATE_TOLERANCE = 0.1
+
+
 @dataclass(frozen=True, slots=True)
 class PcieLink:
-    """Negotiated PCIe link width and speed."""
+    """Negotiated PCIe link width and speed.
+
+    ``speed`` is ``gpu_metrics.pcie_link_speed`` verbatim: tenths of a gigatransfer
+    per second, the unit the kernel itself uses.  Every source that builds a
+    ``PcieLink`` -- the binary metric table and the ``current_link_*`` sysfs files --
+    converts into it, so :attr:`generation` means the same thing for all of them.
+    """
 
     width: int
     speed: int
 
     @property
+    def gt_per_second(self) -> float:
+        """Signalling rate of the negotiated link, in GT/s."""
+        return self.speed / 10
+
+    @property
     def generation(self) -> int:
-        """PCIe generation, derived from the encoded speed value."""
-        return self.speed // 16 if self.speed >= 16 else 0
+        """PCIe generation, or ``0`` when the rate is not a standard one."""
+        if self.speed <= 0:
+            return 0
+        rate, generation = min(_PCIE_GENERATIONS, key=lambda entry: abs(entry[0] - self.speed))
+        if abs(rate - self.speed) > rate * _PCIE_RATE_TOLERANCE:
+            return 0
+        return generation
 
     def describe(self) -> str:
-        """Human readable form such as ``Gen5 x16``."""
+        """Human readable form such as ``Gen3 x16``.
+
+        A rate that matches no generation is shown as the speed it is, never rounded
+        up to the closest one: a wrong generation is a claim about the hardware, and
+        this figure exists to tell you what the link is doing right now.
+        """
         gen = self.generation
         if gen <= 0:
-            return f"x{self.width}"
+            return f"{self.gt_per_second:g} GT/s x{self.width}"
         return f"Gen{gen} x{self.width}"
 
 

@@ -195,7 +195,7 @@ class TestOptionalRowIsHiddenWithoutBlocks:
             return "\n".join(screen_lines(app, 120))
 
         text = render(app, body, size=(120, height))
-        complete = all(m in text for m in ("Gen5 x16", "throttle none", "cap 211 W"))
+        complete = all(m in text for m in ("Gen3 x16", "throttle none", "cap 211 W"))
         assert complete is (height >= MIN_HEIGHT_FOR_SENSORS_COMPLETE)
 
     def test_both_optional_panels_wait_for_the_same_height(self) -> None:

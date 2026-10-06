@@ -217,7 +217,7 @@ class TestScreenSnapshot:
         assert "2,200 MHz" in text
         assert "45.0 W" in text
         assert "cap 211 W" in text
-        assert "Gen5 x16" in text
+        assert "Gen3 x16" in text
         assert "throttle none" in text
 
     def test_memory_readings_are_shown(self, drm_root: Path, proc_root: Path) -> None:

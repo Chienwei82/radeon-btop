@@ -109,7 +109,7 @@ available on this hardware/kernel at all.
 | `vddgfx_offset` | mV | Signed graphics-rail voltage offset | `OD_VDDGFX_OFFSET`, when the driver reports one at all |
 | `blocks.<key>` | % | Utilisation of one hardware block | Optional and off by default; sourced from a `radeontop` child, not from sysfs — see §3.4 |
 | `throttle_status` | flags | Active throttling reasons | Decoded to human-readable set |
-| `pcie_link` | — | Negotiated link width × speed | Optional extra |
+| `pcie_link` | — | Negotiated link width × speed | Optional extra. `gpu_metrics` carries the speed in **0.1 GT/s** (`kgd_pp_interface.h`: *"in 0.1 GT/s"*), never as a generation; the generation is derived from the signalling rate, and a rate matching no standard generation is reported as the speed it is |
 | `voltage_soc` / `voltage_gfx` / `voltage_mem` | mV | Rail voltages | `gpu_metrics` only; often `0`/sentinel → treat as `N/A` |
 
 ### 3.2 Per-process metrics
@@ -320,8 +320,8 @@ file length = 120 bytes     ->  body length = 116 = structure_size - 4
   offset 22  average_socket_power       = 33     hwmon power1_average = 33000000 (33 W) MATCH
   offset 58  current_uclk               = 1000   pp_dpm_mclk current state = 1000 MHz    MATCH
   offset 72  current_fan_speed          = 0      hwmon fan1_input = 0                   MATCH
-  offset 74  pcie_link_width            = 16     PCIe Gen5 x16                           MATCH
-  offset 76  pcie_link_speed            = 80     encoded as 16 * 5                       MATCH
+  offset 74  pcie_link_width            = 16     PCIe Gen3 x16                           MATCH
+  offset 76  pcie_link_speed            = 80     0.1 GT/s units -> 8.0 GT/s -> Gen 3      MATCH
 ```
 
 **Units confirmed:** temperatures are whole **degrees Celsius** (`u16`); power is whole **watts**
@@ -704,7 +704,8 @@ a recording with gaps in it, and choosing to lose samples is the user's call rat
    captured from the reference machine.
 2. All sentinel values (`0xFFFF`, `0xFFFFFFFF`, `0xFFFF_FFFF_FFFF_FFFF`) decode to `None`.
 3. The real blob decodes to `edge=51 °C`, `hotspot=58 °C`, `socket_power=33 W`, `uclk=1000 MHz`,
-   `pcie_link_width=16`, matching the sysfs/hwmon values observed simultaneously.
+   `pcie_link_width=16` matching the sysfs value observed simultaneously, and
+   `pcie_link_speed=80` decoding to 8.0 GT/s (Gen 3) rather than being mistaken for a generation.
 4. Removing any file from the fake sysfs tree, or chmod-ing it `0000`, produces `N/A` and no
    exception.
 5. Two records with the same `drm-client-id` + `drm-pdev` collapse to one row; two records with

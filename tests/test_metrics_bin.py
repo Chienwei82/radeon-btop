@@ -157,8 +157,10 @@ def test_parse_v1_3_reads_every_field() -> None:
     assert parsed.voltages_mv == (("soc", 918), ("gfx", 768), ("mem", 900))
     assert parsed.pcie is not None
     assert parsed.pcie.width == 16
-    assert parsed.pcie.generation == 5
-    assert parsed.pcie.describe() == "Gen5 x16"
+    assert parsed.pcie.speed == 80
+    assert parsed.pcie.gt_per_second == 8.0
+    assert parsed.pcie.generation == 3
+    assert parsed.pcie.describe() == "Gen3 x16"
     assert parsed.throttle is not None
     assert not parsed.throttle.is_throttling
 
@@ -326,7 +328,7 @@ def test_real_hardware_blob_decodes() -> None:
     """A capture of the reference machine's exact metric values decodes correctly.
 
     These are the readings a Navi 21 produced while a browser was running: 49/56/52
-    degrees on edge/junction/mem, 33 W, 918/768/900 mV, PCIe Gen5 x16.  Regression-guarding
+    degrees on edge/junction/mem, 33 W, 918/768/900 mV, PCIe Gen3 x16.  Regression-guarding
     them catches any aligner change that would silently shift every 64-bit field.
     """
     blob = build_metric_table(
@@ -350,7 +352,7 @@ def test_real_hardware_blob_decodes() -> None:
     assert parsed is not None
     assert [t.celsius for t in parsed.temperatures] == [49, 56, 52]
     assert parsed.voltages_mv == (("soc", 918), ("gfx", 768), ("mem", 900))
-    assert parsed.pcie is not None and parsed.pcie.describe() == "Gen5 x16"
+    assert parsed.pcie is not None and parsed.pcie.describe() == "Gen3 x16"
     assert parsed.structure_size == 120
 
 
