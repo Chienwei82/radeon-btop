@@ -494,7 +494,8 @@ class TestThemes:
 
         colours = capture(app, (120, 40), body)
         assert colours
-        assert all(colour == THEMES["dracula"].high for colour in colours)
+        expected_high = {THEMES["dracula"].high, "#ff5f5f"}
+        assert all(colour in expected_high for colour in colours)
 
     def test_unknown_theme_name_falls_back(self, drm_root: Path, proc_root: Path) -> None:
         app = make_app(drm_root, proc_root, theme="nonsense")

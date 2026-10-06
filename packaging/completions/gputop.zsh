@@ -11,7 +11,7 @@
 # would be a second thing to forget when a binding changes.  They are documented in
 # gputop(1), which ships in the same package; run "man gputop" and read the KEYS section.
 
-_gputop_themes=(default dracula gruvbox)
+_gputop_themes=(default dracula gruvbox monochrome radeon)
 _gputop_kinds=(auto igpu dgpu)
 
 _gputop() {
@@ -26,7 +26,7 @@ _gputop() {
         '--dump[write one JSON snapshot of the live machine to stdout and exit]' \
         '--devices[list the discovered GPUs as JSON and exit]' \
         '--kind=[force every device to be classified as integrated or discrete]:device kind:_values "kind" auto igpu dgpu' \
-        '--theme=[colour theme]:colour theme:_values "theme" default dracula gruvbox' \
+        '--theme=[colour theme]:colour theme:_values "theme" default dracula gruvbox monochrome radeon' \
         '--no-color[disable 24-bit colour and fall back to terminal ANSI colours]' \
         '--no-processes[skip the /proc scan, the most expensive part of a sample]' \
         '--pretty[indent --dump and --devices output for human reading]' \

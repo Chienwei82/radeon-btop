@@ -8,7 +8,7 @@
 # copy of the one in gputop(1) that drifts.  They are documented in the man page, which
 # ships in the same package.
 
-_gputop_themes="default dracula gruvbox"
+_gputop_themes="default dracula gruvbox monochrome radeon"
 _gputop_kinds="auto igpu dgpu"
 
 _gputop_long_opts="--version --config --interval --drm-root --proc-root --dump --devices
