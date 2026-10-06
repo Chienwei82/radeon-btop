@@ -26,3 +26,7 @@ htmlcov/
 
 # gputop runtime artefacts
 *.log
+
+# Cline agent memory (local only, never published)
+/memory-bank/
+/.clinerules/
