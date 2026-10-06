@@ -282,9 +282,7 @@ class ProcessTable(Vertical):
         for row, cell_row in zip(shown, cells, strict=True):
             table.add_row(*cell_row, key=self._row_key(row.process.identity))
         self._keys = tuple(row.process.identity for row in shown)
-        self._identity_by_key = {
-            self._row_key(identity): identity for identity in self._keys
-        }
+        self._identity_by_key = {self._row_key(identity): identity for identity in self._keys}
         # ``DataTable.add_row`` posts a highlight for the first row added after a
         # ``clear()`` -- "a position has opened for the cursor".  That is a rebuild
         # artifact, not the user choosing row 0, and it would re-select the first row on
@@ -391,7 +389,9 @@ class ProcessTable(Vertical):
         """A ``DataTable`` row key that encodes the client's identity."""
         return f"{identity[0]}:{identity[1]}"
 
-    def _restore_cursor(self, table: DataTable[object], previous: tuple[str, int] | None) -> None:
+    def _restore_cursor(
+        self, table: DataTable[object], previous: tuple[str, int] | None
+    ) -> None:
         """Put the cursor back on the same client after a rebuild.
 
         A row index would be wrong the moment a process exits; the identity is the only

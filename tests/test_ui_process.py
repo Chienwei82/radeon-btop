@@ -1671,8 +1671,10 @@ class TestSelectionLifecycle:
             assert table_of(app).selected is not None
             shutil.rmtree(proc_root / "4242")
             await wait_until(
-                lambda: app._last_snapshot is not None
-                and all(p.pid != 4242 for p in app._last_snapshot.processes),
+                lambda: (
+                    app._last_snapshot is not None
+                    and all(p.pid != 4242 for p in app._last_snapshot.processes)
+                ),
                 what="a sample without the exited process",
             )
             await wait_until(
