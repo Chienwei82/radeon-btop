@@ -1125,7 +1125,10 @@ class TestMouse:
             await wait_until(lambda: _marked_style(table) != "", what="the marker to be styled")
             before = _marked_style(table)
             app.set_theme("dracula")
-            await pilot.pause()
+            await wait_until(
+                lambda: _marked_style(table) not in ("", before),
+                what="the marker to be recoloured",
+            )
             return before, _marked_style(table)
 
         before, after = capture(app, body)
