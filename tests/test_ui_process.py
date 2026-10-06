@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from textual.pilot import Pilot
 from textual.widgets._data_table import RowDoesNotExist
+from rich.text import Text
 
 from gputop import control
 from gputop.config import (
@@ -303,7 +304,9 @@ def _marked_style(table: ProcessTable) -> str:
     """
     for row in table.rows:
         cell = table.grid.get_row(f"{row.process.bdf}:{row.process.client_id}")[0]
-        if not isinstance(cell, str) and cell.style is not None:
+        # Marked rows are the only ones whose cells carry a style; plain (unmarked) cells
+        # have style == "" (not None), so test truthiness rather than ``is not None``.
+        if isinstance(cell, Text) and cell.style:
             return str(cell.style.color)
     return ""
 
@@ -1119,6 +1122,7 @@ class TestMouse:
         async def body(pilot: Pilot[Any]) -> tuple[str, str]:
             table = table_of(app)
             await make_busy(app, proc_root, pilot)
+            await wait_until(lambda: _marked_style(table) != "", what="the marker to be styled")
             before = _marked_style(table)
             app.set_theme("dracula")
             await pilot.pause()
